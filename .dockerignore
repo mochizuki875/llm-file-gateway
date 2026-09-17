@@ -1,0 +1,14 @@
+**
+
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+
+!.devcontainer/
+!.devcontainer/fonts.conf

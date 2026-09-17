@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Python & ML Ecosystem</title>
+<style>
+    body {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        background-color: #0f172a;
+        color: #e2e8f0;
+        line-height: 1.6;
+        padding: 20px;
+    }
+    .container {
+        max-width: 1000px;
+        margin: 0 auto;
+    }
+    h1 {
+        text-align: center;
+        color: #38bdf8;
+        margin-bottom: 5px;
+    }
+    .subtitle {
+        text-align: center;
+        color: #94a3b8;
+        margin-bottom: 30px;
+    }
+    .ecosystem-map {
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+    }
+    .layer {
+        background-color: #1e293b;
+        border: 1px solid #334155;
+        border-left: 6px solid #3b82f6;
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .layer-title {
+        color: #7dd3fc;
+        margin-top: 0;
+        margin-bottom: 15px;
+        font-size: 1.25rem;
+        border-bottom: 1px solid #334155;
+        padding-bottom: 5px;
+    }
+    .tools {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+    }
+    .tool-card {
+        background-color: #0f172a;
+        border: 1px solid #475569;
+        border-radius: 6px;
+        padding: 10px 15px;
+        flex: 1 1 calc(33.333% - 24px);
+        min-width: 200px;
+    }
+    .tool-name {
+        font-weight: bold;
+        color: #f8fafc;
+        display: block;
+        margin-bottom: 4px;
+    }
+    .tool-desc {
+        font-size: 0.85rem;
+        color: #94a3b8;
+    }
+</style>
+</head>
+<body>
+    <div class="container">
+        <h1>The Python & ML Ecosystem</h1>
+        <div class="subtitle">A layered map of dependencies, frameworks, and tools in AI development</div>
+
+        <div class="ecosystem-map">
+            <!-- Layer 7 -->
+            <div class="layer">
+                <h2 class="layer-title">Layer 7: MLOps, Deployment & UI</h2>
+                <div class="tools">
+                    <div class="tool-card"><span class="tool-name">FastAPI & Flask</span><span class="tool-desc">Model serving APIs</span></div>
+                    <div class="tool-card"><span class="tool-name">Streamlit & Gradio</span><span class="tool-desc">Rapid web app & ML demos</span></div>
+                    <div class="tool-card"><span class="tool-name">MLflow & W&B</span><span class="tool-desc">Experiment tracking & registries</span></div>
+                    <div class="tool-card"><span class="tool-name">Docker</span><span class="tool-desc">Inference & containerization</span></div>
+                </div>
+            </div>
+
+            <!-- Layer 6 -->
+            <div class="layer">
+                <h2 class="layer-title">Layer 6: Specialized Domains & Generative AI</h2>
+                <div class="tools">
+                    <div class="tool-card"><span class="tool-name">Hugging Face</span><span class="tool-desc">Transformers & NLP</span></div>
+                    <div class="tool-card"><span class="tool-name">LangChain & LlamaIndex</span><span class="tool-desc">AI orchestration & RAG</span></div>
+                    <div class="tool-card"><span class="tool-name">OpenCV & torchvision</span><span class="tool-desc">Computer Vision</span></div>
+                </div>
+            </div>
+
+            <!-- Layer 5 -->
+            <div class="layer">
+                <h2 class="layer-title">Layer 5: Deep Learning Frameworks</h2>
+                <div class="tools">
+                    <div class="tool-card"><span class="tool-name">PyTorch</span><span class="tool-desc">Flexible, dynamic neural networks</span></div>
+                    <div class="tool-card"><span class="tool-name">TensorFlow</span><span class="tool-desc">Scalable, enterprise-grade DL</span></div>
+                    <div class="tool-card"><span class="tool-name">JAX</span><span class="tool-desc">High-performance hardware acceleration</span></div>
+                </div>
+            </div>
+
+            <!-- Layer 4 -->
+            <div class="layer">
+                <h2 class="layer-title">Layer 4: Classical Machine Learning & Stats</h2>
+                <div class="tools">
+                    <div class="tool-card"><span class="tool-name">Scikit-Learn</span><span class="tool-desc">Standard ML library</span></div>
+                    <div class="tool-card"><span class="tool-name">XGBoost & LightGBM</span><span class="tool-desc">Gradient boosting & trees</span></div>
+                    <div class="tool-card"><span class="tool-name">Statsmodels</span><span class="tool-desc">Statistical modeling and tests</span></div>
+                </div>
+            </div>
+
+            <!-- Layer 3 -->
+            <div class="layer">
+                <h2 class="layer-title">Layer 3: Data Visualization & EDA</h2>
+                <div class="tools">
+                    <div class="tool-card"><span class="tool-name">Matplotlib</span><span class="tool-desc">Standard 2D plotting</span></div>
+                    <div class="tool-card"><span class="tool-name">Seaborn</span><span class="tool-desc">Statistical data visualization</span></div>
+                    <div class="tool-card"><span class="tool-name">Plotly</span><span class="tool-desc">Interactive & dynamic graphics</span></div>
+                </div>
+            </div>
+
+            <!-- Layer 2 -->
+            <div class="layer">
+                <h2 class="layer-title">Layer 2: Data Manipulation & Numerical Computation</h2>
+                <div class="tools">
+                    <div class="tool-card"><span class="tool-name">NumPy</span><span class="tool-desc">N-dimensional arrays & linear algebra</span></div>
+                    <div class="tool-card"><span class="tool-name">Pandas</span><span class="tool-desc">DataFrames & data analysis</span></div>
+                    <div class="tool-card"><span class="tool-name">SciPy</span><span class="tool-desc">Scientific computing</span></div>
+                </div>
+            </div>
+
+            <!-- Layer 1 -->
+            <div class="layer">
+                <h2 class="layer-title">Layer 1: Core Foundation</h2>
+                <div class="tools">
+                    <div class="tool-card"><span class="tool-name">Python 3</span><span class="tool-desc">The primary programming language</span></div>
+                    <div class="tool-card"><span class="tool-name">Jupyter</span><span class="tool-desc">Interactive prototyping</span></div>
+                    <div class="tool-card"><span class="tool-name">pip & Conda</span><span class="tool-desc">Package & environment management</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
