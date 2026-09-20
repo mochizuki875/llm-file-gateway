@@ -96,24 +96,42 @@ func (server *Server) documentParts(document resolvedDocument, kind string) ([]a
 		return nil, nil
 	}
 	parts := make([]any, 0)
-	images := 0
-	for _, artifact := range document.manifest.Documents[0].Parts {
-		text, err := os.ReadFile(filepath.Join(document.derivedDir, artifact.TextPath))
+	manifestDocument := document.manifest.Documents[0]
+	if manifestDocument.TextPath != "" {
+		text, err := os.ReadFile(filepath.Join(document.derivedDir, manifestDocument.TextPath))
 		if err != nil {
-			slog.Error("document text artifact read failed", "filename", document.filename, "part", artifact.PartNumber, "error", err)
+			slog.Error("document text artifact read failed", "filename", document.filename, "error", err)
 			return nil, err
 		}
 		if len(text) > 0 {
-			location := fmt.Sprintf("part=\"%d\"", artifact.PartNumber)
-			if artifact.PageNumber != nil {
-				location = fmt.Sprintf("page=\"%d\"", *artifact.PageNumber)
-			}
-			label := fmt.Sprintf("<document filename=\"%s\" %s>\n%s\n</document>", document.filename, location, text)
+			label := fmt.Sprintf("<document filename=\"%s\">\n%s\n</document>", document.filename, text)
 			textType := "input_text"
 			if kind == "chat" {
 				textType = "text"
 			}
 			parts = append(parts, map[string]any{"type": textType, "text": label})
+		}
+	}
+	images := 0
+	for _, artifact := range manifestDocument.Parts {
+		if artifact.TextPath != "" {
+			text, err := os.ReadFile(filepath.Join(document.derivedDir, artifact.TextPath))
+			if err != nil {
+				slog.Error("document text artifact read failed", "filename", document.filename, "part", artifact.PartNumber, "error", err)
+				return nil, err
+			}
+			if len(text) > 0 {
+				location := fmt.Sprintf("part=\"%d\"", artifact.PartNumber)
+				if artifact.PageNumber != nil {
+					location = fmt.Sprintf("page=\"%d\"", *artifact.PageNumber)
+				}
+				label := fmt.Sprintf("<document filename=\"%s\" %s>\n%s\n</document>", document.filename, location, text)
+				textType := "input_text"
+				if kind == "chat" {
+					textType = "text"
+				}
+				parts = append(parts, map[string]any{"type": textType, "text": label})
+			}
 		}
 		if artifact.ImagePath == nil || images >= server.settings.MaxDocumentImages {
 			continue

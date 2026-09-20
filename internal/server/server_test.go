@@ -86,6 +86,11 @@ func TestFileLifecycle(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	record, err := dataStore.GetInternal(context.Background(), id)
+	if err != nil || record == nil {
+		t.Fatalf("stored file = %#v, %v", record, err)
+	}
+	fileDirectory := filepath.Dir(filepath.Join(settings.DataDir, record.SourcePath))
 
 	request = httptest.NewRequest(http.MethodDelete, "/v1/files/"+id, nil)
 	request.Header.Set("Authorization", "Bearer client-key")
@@ -93,6 +98,12 @@ func TestFileLifecycle(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("delete status = %d: %s", response.Code, response.Body.String())
+	}
+	if record, err := dataStore.GetInternal(context.Background(), id); err != nil || record != nil {
+		t.Fatalf("deleted database record = %#v, %v; want nil, nil", record, err)
+	}
+	if _, err := os.Stat(fileDirectory); !os.IsNotExist(err) {
+		t.Fatalf("deleted file directory stat error = %v; want not exist", err)
 	}
 }
 
@@ -165,7 +176,8 @@ func TestResponsesExpandsInlineUnknownTextFormat(t *testing.T) {
 	settings.MaxDocumentImages = 8
 	handler := NewHandler(settings, dataStore, service)
 	payload := map[string]any{
-		"model": "test-model",
+		"model":                "test-model",
+		"previous_response_id": "resp_previous",
 		"input": []any{map[string]any{
 			"role": "user",
 			"content": []any{
@@ -184,6 +196,9 @@ func TestResponsesExpandsInlineUnknownTextFormat(t *testing.T) {
 	}
 	if response.Code != http.StatusOK {
 		t.Fatalf("responses status = %d: %s", response.Code, response.Body.String())
+	}
+	if upstreamPayload["previous_response_id"] != "resp_previous" {
+		t.Fatalf("previous_response_id = %#v, want resp_previous", upstreamPayload["previous_response_id"])
 	}
 	items := upstreamPayload["input"].([]any)
 	content := items[0].(map[string]any)["content"].([]any)
@@ -371,6 +386,46 @@ func TestDocumentPartsReportsMissingArtifact(t *testing.T) {
 
 	if _, err := server.documentParts(document, "responses"); err == nil {
 		t.Fatal("documentParts() succeeded with a missing text artifact")
+	}
+}
+
+func TestDocumentPartsEmitsDocumentTextBeforeImages(t *testing.T) {
+	settings, _, _ := testDependencies(t)
+	settings.MaxDocumentImages = 1
+	server := &Server{settings: settings}
+	derivedDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(derivedDir, "document.txt"), []byte("complete document text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(derivedDir, "page.png"), []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	imagePath := "page.png"
+	pageNumber := 1
+	document := resolvedDocument{
+		filename:   "document.docx",
+		derivedDir: derivedDir,
+		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{
+			TextPath: "document.txt",
+			Parts: []converter.Artifact{{
+				PartNumber: 1, PageNumber: &pageNumber, ImagePath: &imagePath,
+			}},
+		}}},
+	}
+
+	parts, err := server.documentParts(document, "responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("parts = %#v, want document text and one image", parts)
+	}
+	text := parts[0].(map[string]any)
+	if text["type"] != "input_text" || !strings.Contains(text["text"].(string), "complete document text") || strings.Contains(text["text"].(string), "page=") {
+		t.Fatalf("document text part = %#v", text)
+	}
+	if parts[1].(map[string]any)["type"] != "input_image" {
+		t.Fatalf("image part = %#v", parts[1])
 	}
 }
 

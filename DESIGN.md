@@ -90,7 +90,7 @@ stateDiagram-v2
   failed --> deleted
 ```
 
-Files APIは保存後に`uploaded`を返す。`CONVERSION_WORKERS`個のworkerが変換し、manifestを永続化して`processed`へ更新する。worker数の既定値は2で、正の整数に変更できる。保持期限は作成時刻から`FILE_TTL_SECONDS`後で、既定値は300秒とする。正の整数で変更でき、`expires_after`を指定する場合は設定中の秒数と一致しなければならない。起動時には中断された`uploaded`と`processing`を再投入する。janitorは期限切れレコードを論理削除し、関連directoryを物理削除する。
+Files APIは保存後に`uploaded`を返す。`CONVERSION_WORKERS`個のworkerが変換し、manifestを永続化して`processed`へ更新する。worker数の既定値は2で、正の整数に変更できる。保持期限は作成時刻から`FILE_TTL_SECONDS`後で、既定値は300秒とする。正の整数で変更でき、Files API実行時に`expires_after`を指定する場合は`FILE_TTL_SECONDS`よりも短い値とする必要がある。Gatewayの再起動時には、SQLiteに残っている有効期限内の`uploaded`または`processing`状態のfile IDを変換queueへ追加し、変換を最初から再実行する。janitorは期限切れレコードと関連directoryを物理削除する。
 
 ```mermaid
 sequenceDiagram
@@ -118,7 +118,7 @@ sequenceDiagram
   Worker->>Store: status=processed
 ```
 
-queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworker goroutineが共有する。起動時はSQLiteから有効な`uploaded`または`processing`を取得してqueueへ再投入する。workerとは別のjanitor goroutineが30秒ごとに期限切れfileを削除する。停止時は共通contextをcancelし、すべてのgoroutineの終了を待つ。
+queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworker goroutineが共有する。起動時はSQLiteから有効期限内の`uploaded`または`processing`状態のfile IDを取得してqueueへ追加し、変換を最初から再実行する。workerとは別のjanitor goroutineが30秒ごとに期限切れfileを削除する。停止時は共通contextをcancelし、すべてのgoroutineの終了を待つ。
 
 ## Conversion
 
@@ -126,9 +126,9 @@ queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworke
 
 Gatewayはrendererの既定値をそのまま使わず、`DefaultRenderOptions`を取得して必要なfieldだけを上書きする。rendererはページ単位で画像を保存し、途中失敗時に既生成画像を残す。また出力directory内の無関係なfileを削除しない。このためGatewayは専有する`derived` directoryと同階層の`manifest.json`を変換開始前に初期化し、変換が完了しなければ両方を削除する。rendererが返す`UnsupportedFormatError`、`DependencyNotFoundError`、`DocumentConversionError`、`DocumentRenderError`を含む変換errorはconverterから呼び出し元へ伝播する。
 
-PDFと全Office形式のテキスト抽出はrendererへ委譲し、Gatewayは`ExtractResult.Parts`を順番どおりartifactへ対応付ける。`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とし、`false`の場合はrendererの抽出処理を呼ばず、PDFとOfficeを画像だけのcontent partへ展開する。テキスト系は入力内容そのものであるため設定対象外とし、UTF-8を要求する。HTMLは非表示要素を除外し、未知拡張子のUTF-8テキストはplain textとして内容をそのまま保持する。JPEG/PNGは再圧縮しない。抽出を有効にした場合、文字数上限はtext-only形式だけでなく、PDFとOfficeにも描画前に適用する。
+PDFと全Office形式のテキスト抽出はrendererへ委譲し、Gatewayは`ExtractResult.Text()`で結合した文書全体のテキストを一つのartifactとして保存する。rendererは抽出text partと描画画像の対応を保証しないため、テキストへpage、slide、sheet番号を割り当てない。描画画像は元文書のページ、スライド、シート単位のartifactとして順序と番号を保持する。`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とし、`false`の場合はrendererの抽出処理を呼ばず、PDFとOfficeを画像だけのcontent partへ展開する。テキスト系は入力内容そのものであるため設定対象外とし、UTF-8を要求する。HTMLは非表示要素を除外し、未知拡張子のUTF-8テキストはplain textとして内容をそのまま保持する。JPEG/PNGは再圧縮しない。抽出を有効にした場合、文字数上限はtext-only形式だけでなく、PDFとOfficeにも描画前に適用する。
 
-成果物は`manifest.json`とpart単位のtext/imageで構成する。Files API成果物は`GATEWAY_DATA_DIR/files/<tenant>/<file_id>`、inline入力は`work`以下へ置き、request終了時に削除する。
+成果物は`manifest.json`、文書単位の抽出text、part単位のimageで構成する。schema version 3ではdocumentの`text_path`と各image partを独立させる。Files API成果物は`GATEWAY_DATA_DIR/files/<tenant>/<file_id>`、inline入力は`work`以下へ置き、request終了時に削除する。
 
 Responses APIとChat Completions APIの`stream: true`は、入力展開後にvLLMへそのまま転送する。vLLMのSSE response headerとbodyを変換せず、eventを受信するたびにclientへflushする。client切断時はrequest contextを通じて上流通信をcancelする。`REQUEST_TIMEOUT_SECONDS`はstream全体の上限にも適用する。
 

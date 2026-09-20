@@ -39,6 +39,42 @@ func TestResolveMissingFileLogsWarning(t *testing.T) {
 	}
 }
 
+func TestDeleteExpiredRemovesDatabaseRecordAndFiles(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	relativeSource := filepath.Join("files", "tenant-a", "file_expired", "source.txt")
+	source := filepath.Join(dataDir, relativeSource)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("expired"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	record := store.File{
+		ID: "file_expired", TenantID: "tenant-a", Filename: "source.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "processed",
+		SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now - 60, ExpiresAt: now - 1,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(config.Config{DataDir: dataDir}, dataStore)
+	service.deleteExpired(context.Background())
+
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("expired database record = %#v, %v; want nil, nil", current, err)
+	}
+	if _, err := os.Stat(filepath.Dir(source)); !os.IsNotExist(err) {
+		t.Fatalf("expired file directory stat error = %v; want not exist", err)
+	}
+}
+
 func TestStartResumesPendingConversion(t *testing.T) {
 	dataDir := t.TempDir()
 	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))

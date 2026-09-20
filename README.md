@@ -5,7 +5,7 @@
 > [!WARNING]
 > 本プロジェクトはMVP実装です。評価・開発用途に使用してください。
 
-PDF、Office文書、テキスト、画像をOpenAI Files API互換のファイル入力としてvLLMへ渡すGo製Gatewayです。Files APIで保存した`file_id`、inline base64、公開HTTPS URLを抽出テキストとdata URL画像へ展開し、Responses APIまたはChat Completions APIへ転送します。
+PDF、Office文書、テキスト、画像を[OpenAI Files API](https://developers.openai.com/api/reference/java/resources/files)互換のファイル入力としてvLLMへ渡すGo製Gatewayです。Files APIで保存した`file_id`、inline base64、公開HTTPS URLを抽出テキストとdata URL画像へ展開し、Responses APIまたはChat Completions APIへ転送します。
 
 文書画像変換には[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)を使用します。
 
@@ -31,16 +31,16 @@ PDF、Office文書、テキスト、画像をOpenAI Files API互換のファイ�
 | Chat Completions | `POST /v1/chat/completions` | Supported |
 | Other vLLM APIs | `/v1/*` | Passed through |
 
-Files APIが所有するパスの未対応メソッドはvLLMへ転送せず、`405`を返します。Responses APIの`previous_response_id`には対応していません。Responses APIとChat Completions APIは`stream: true`によるSSEに対応します。
+Files APIが所有するパスの未対応メソッドはvLLMへ転送せず、`405`を返します。
 
 ## Supported Formats
 
 | 種別 | 拡張子 | モデルへの入力 |
 | --- | --- | --- |
-| PDF | `.pdf` | ページ単位の抽出テキストと画像 |
-| Word | `.doc`, `.docx` | ページ画像と抽出テキスト |
-| PowerPoint | `.ppt`, `.pptx` | スライド画像と抽出テキスト |
-| Excel | `.xls`, `.xlsx`, `.xlsm` | シート画像とセル値 |
+| PDF | `.pdf` | 文書全体の抽出テキストとページ画像 |
+| Word | `.doc`, `.docx` | 文書全体の抽出テキストとページ画像 |
+| PowerPoint | `.ppt`, `.pptx` | 文書全体の抽出テキストとスライド画像 |
+| Excel | `.xls`, `.xlsx`, `.xlsm` | 文書全体の抽出テキストとシート画像 |
 | Text | `.txt`, `.md`, `.markdown`, `.json`, `.jsonl`, `.yaml`, `.yml`, `.go`など | UTF-8の内容をそのまま使用 |
 | Structured text | `.csv`, `.html`, `.htm` | 共通text converterでCSVを行形式、HTMLを可視テキストへ抽出 |
 | Image | `.jpeg`, `.jpg`, `.png` | 元形式の画像 |
@@ -136,6 +136,7 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。`.en
 set -a
 . ./.env
 set +a
+
 go run ./cmd/llm-file-gateway
 ```
 
@@ -256,7 +257,7 @@ curl --fail --silent -X DELETE "$OPENAI_BASE_URL/files/$FILE_ID" \
 - 抽出テキストはPDF、Office、すべてのテキスト形式を含めて`MAX_DOCUMENT_TEXT_CHARS`で制限します。
 - Files APIの`purpose`は`user_data`だけを受け付けます。`expires_after`を指定する場合は`{"anchor":"created_at","seconds":<FILE_TTL_SECONDS>}`と一致させる必要があります。
 - Files APIの変換は非同期です。推論で参照する前に`status: "processed"`を確認してください。変換中は`409 file_not_ready`、失敗後は`422 file_processing_failed`を返します。
-- Responses APIの`previous_response_id`は`400 unsupported_feature`を返します。
+- Responses APIの`previous_response_id`はそのままvLLMへ転送するため、利用可否はvLLM側の対応と設定に依存します。
 - `stream: true`ではvLLMのSSE eventとresponse headerを逐次転送します。
 - Responsesの文字列形式`input`にファイルを追加することはできません。Chat Completionsのファイルは配列形式の`content`内で展開します。
 - JPEG/PNGは再圧縮しません。通常のテキスト形式は元テキストを保持し、HTMLは外部URLや埋め込み画像を取得しません。
@@ -292,7 +293,7 @@ DESIGN.md                 設計と実装境界
 - `convertRenderedDocument`: PDF/Officeの画像化とpage単位artifact
 - `convertTextDocument`: text上限とtext-only artifact
 - `convertImageDocument`: 元画像を保持するimage artifact
-- `writeResult`: schema version 2のmanifest生成
+- `writeResult`: schema version 3のmanifest生成
 
 PDF/Office変換では`document-image-renderer`の`renderer.RenderDocument`をLibreOffice timeout 300秒で呼び出し、画像は150 DPIのPNGとして生成します。`DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合は`renderer.ExtractDocumentWithOptions`も呼び出します。Gatewayは変換ごとに専有する`derived` directoryと`manifest.json`を初期化し、途中失敗時は両方を削除します。
 

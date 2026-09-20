@@ -196,23 +196,16 @@ func (store *Store) UpdateStatus(ctx context.Context, id, status, manifestPath, 
 	return nil
 }
 
-func (store *Store) MarkDeleted(ctx context.Context, id, tenantID string) (*File, error) {
-	file, err := store.Get(ctx, id, tenantID)
-	if err != nil || file == nil {
-		return file, err
-	}
+func (store *Store) Delete(ctx context.Context, id, tenantID string) (bool, error) {
 	result, err := store.database.ExecContext(ctx,
-		"UPDATE files SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL",
-		store.now().Unix(), id, tenantID,
+		"DELETE FROM files WHERE id = ? AND tenant_id = ?",
+		id, tenantID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("mark file deleted: %w", err)
+		return false, fmt.Errorf("delete file: %w", err)
 	}
 	count, err := result.RowsAffected()
-	if err != nil || count != 1 {
-		return nil, err
-	}
-	return file, nil
+	return count == 1, err
 }
 
 func (store *Store) Pending(ctx context.Context) ([]string, error) {
@@ -225,7 +218,7 @@ func (store *Store) Pending(ctx context.Context) ([]string, error) {
 func (store *Store) Expired(ctx context.Context) ([]File, error) {
 	const query = `SELECT id, tenant_id, filename, media_type, purpose, byte_size, sha256,
 status, source_path, manifest_path, error_message, created_at, expires_at, deleted_at
-FROM files WHERE deleted_at IS NULL AND expires_at <= ?`
+FROM files WHERE deleted_at IS NOT NULL OR expires_at <= ?`
 	rows, err := store.database.QueryContext(ctx, query, store.now().Unix())
 	if err != nil {
 		return nil, fmt.Errorf("list expired files: %w", err)

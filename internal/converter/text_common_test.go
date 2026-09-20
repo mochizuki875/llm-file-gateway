@@ -35,7 +35,7 @@ func TestTextConverters(t *testing.T) {
 			if string(content) != test.want {
 				t.Fatalf("text = %q, want %q", content, test.want)
 			}
-			if result.Manifest.SchemaVersion != 2 || result.Artifacts[0].ImagePath != nil {
+			if result.Manifest.SchemaVersion != 3 || result.Artifacts[0].ImagePath != nil {
 				t.Fatalf("unexpected result: %#v", result)
 			}
 		})

@@ -36,8 +36,9 @@ type ManifestSource struct {
 }
 
 type ManifestDocument struct {
-	Name  string     `json:"name"`
-	Parts []Artifact `json:"parts"`
+	Name     string     `json:"name"`
+	TextPath string     `json:"text_path,omitempty"`
+	Parts    []Artifact `json:"parts"`
 }
 
 type Result struct {

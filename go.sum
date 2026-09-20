@@ -26,8 +26,8 @@ github.com/klippa-app/go-pdfium v1.20.3 h1:iveJGFbM+jFvP4/nenwh8b3yH//nULMh2eSBt
 github.com/klippa-app/go-pdfium v1.20.3/go.mod h1:gmSr6U8XvHVKIlpPmsrIj54aDhE5ccNIRl+aTwkT6YQ=
 github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=
 github.com/mattn/go-isatty v0.0.24/go.mod h1:nMCL3Zebbrt45jsMDgnfIwz6ydEQApk5oEI3HqDio6A=
-github.com/mochizuki875/document-image-renderer v0.2.0 h1:Dlq4pXUrtO0WTJEbFSNYXTlddZ/3ZxrdgC1PDh0K9Xs=
-github.com/mochizuki875/document-image-renderer v0.2.0/go.mod h1:19utpkVZF3igrLO9e30KVD5hFRTQjMdGs0pPEwTmbu8=
+github.com/mochizuki875/document-image-renderer v0.2.1-0.20260920152425-ec6a2d2dd855 h1:4YpI5ML3hXTvD9W7A04Wsjo/s3oTRy5SinAHx/cnxQE=
+github.com/mochizuki875/document-image-renderer v0.2.1-0.20260920152425-ec6a2d2dd855/go.mod h1:19utpkVZF3igrLO9e30KVD5hFRTQjMdGs0pPEwTmbu8=
 github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/onsi/ginkgo/v2 v2.32.2 h1:2o6vyFvR6snrJWgRVztC+OwuqqPEMI1UzYl2s2iU7Cg=

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -38,12 +39,26 @@ func TestStoreScopesFilesByTenantAndLifetime(t *testing.T) {
 		t.Fatalf("listed files = %#v, want active file", files)
 	}
 
-	deleted, err := store.MarkDeleted(context.Background(), active.ID, "tenant-a")
-	if err != nil || deleted == nil {
-		t.Fatalf("delete = %#v, %v", deleted, err)
+	deleted, err := store.Delete(context.Background(), active.ID, "tenant-a")
+	if err != nil || !deleted {
+		t.Fatalf("delete = %t, %v", deleted, err)
 	}
 	if file, err := store.Get(context.Background(), active.ID, "tenant-a"); err != nil || file != nil {
 		t.Fatalf("deleted get = %#v, %v; want nil, nil", file, err)
+	}
+	if file, err := store.GetInternal(context.Background(), active.ID); err != nil || file != nil {
+		t.Fatalf("deleted internal get = %#v, %v; want nil, nil", file, err)
+	}
+	removed, err := store.Delete(context.Background(), expired.ID, expired.TenantID)
+	if err != nil || !removed {
+		t.Fatalf("delete expired = %t, %v; want true, nil", removed, err)
+	}
+	expiredFiles, err := store.Expired(context.Background())
+	if err != nil || len(expiredFiles) != 0 {
+		t.Fatalf("expired files after deletion = %#v, %v; want empty", expiredFiles, err)
+	}
+	if file, err := store.GetInternal(context.Background(), expired.ID); err != nil || file != nil {
+		t.Fatalf("expired internal get = %#v, %v; want nil, nil", file, err)
 	}
 }
 
@@ -73,6 +88,25 @@ func TestPendingAndStatusUpdate(t *testing.T) {
 	}
 	if updated.Status != "processed" || updated.ManifestPath.String != "files/manifest.json" {
 		t.Fatalf("updated file = %#v", updated)
+	}
+}
+
+func TestExpiredIncludesLegacyDeletedFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	dataStore, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	file := testFile("file_deleted", "tenant-a", now, now+3600)
+	file.DeletedAt = sql.NullInt64{Int64: now, Valid: true}
+	if err := dataStore.Add(context.Background(), file); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	files, err := dataStore.Expired(context.Background())
+	if err != nil || len(files) != 1 || files[0].ID != file.ID {
+		t.Fatalf("cleanup candidates = %#v, %v; want %s", files, err, file.ID)
 	}
 }
 

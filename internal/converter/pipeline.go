@@ -17,7 +17,7 @@ import (
 )
 
 func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType string, options Options) (Result, error) {
-	var textBlocks []string
+	documentText := ""
 	if !options.DisableTextExtraction {
 		extractOptions := renderer.DefaultExtractOptions()
 		extractOptions.LibreOfficeTimeout = 300 * time.Second
@@ -25,11 +25,8 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 		if err != nil {
 			return Result{}, err
 		}
-		textBlocks = make([]string, 0, len(extracted.Parts))
-		for _, part := range extracted.Parts {
-			textBlocks = append(textBlocks, part.Text)
-		}
-		if err := validateTextLimit(textBlocks, options.MaxTextChars); err != nil {
+		documentText = extracted.Text()
+		if err := validateTextLimit([]string{documentText}, options.MaxTextChars); err != nil {
 			return Result{}, err
 		}
 	}
@@ -45,16 +42,15 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 		if rendered.PageCount() > options.MaxPages {
 			return Result{}, &PageLimitError{Limit: options.MaxPages}
 		}
-		artifacts := make([]Artifact, 0, len(rendered.Images))
-		for index, page := range rendered.Images {
-			text := ""
-			if index < len(textBlocks) {
-				text = textBlocks[index]
-			}
-			textName := fmt.Sprintf("page-%04d.txt", index+1)
-			if err := os.WriteFile(filepath.Join(outputDir, textName), []byte(text), 0o644); err != nil {
+		textPath := ""
+		if !options.DisableTextExtraction {
+			textPath = "document.txt"
+			if err := os.WriteFile(filepath.Join(outputDir, textPath), []byte(documentText), 0o644); err != nil {
 				return Result{}, err
 			}
+		}
+		artifacts := make([]Artifact, 0, len(rendered.Images))
+		for index, page := range rendered.Images {
 			imageName := filepath.Base(page.Path)
 			digest, err := hashFile(page.Path)
 			if err != nil {
@@ -63,12 +59,12 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 			pageNumber, width, height := page.PageNumber, page.Width, page.Height
 			imageMediaType := "image/png"
 			artifacts = append(artifacts, Artifact{
-				PartNumber: index + 1, PageNumber: &pageNumber, TextPath: textName,
+				PartNumber: index + 1, PageNumber: &pageNumber,
 				ImagePath: &imageName, Width: &width, Height: &height,
 				MediaType: &imageMediaType, SHA256: &digest,
 			})
 		}
-		return writeResult(source, outputDir, mediaType, artifacts)
+		return writeResult(source, outputDir, mediaType, textPath, artifacts)
 	})
 }
 
@@ -85,7 +81,7 @@ func convertTextDocument(source, outputDir, mediaType string, textBlocks []strin
 			}
 			artifacts = append(artifacts, Artifact{PartNumber: index + 1, TextPath: name})
 		}
-		return writeResult(source, outputDir, mediaType, artifacts)
+		return writeResult(source, outputDir, mediaType, "", artifacts)
 	})
 }
 
@@ -117,7 +113,7 @@ func convertImageDocument(source, outputDir, mediaType string, width, height int
 			PartNumber: 1, TextPath: "part-0001.txt", ImagePath: &imageName,
 			Width: &width, Height: &height, MediaType: &mediaType, SHA256: &digest,
 		}
-		return writeResult(source, outputDir, mediaType, []Artifact{artifact})
+		return writeResult(source, outputDir, mediaType, "", []Artifact{artifact})
 	})
 }
 
@@ -153,16 +149,16 @@ func removeConversionOutput(outputDir string) error {
 	return nil
 }
 
-func writeResult(source, outputDir, mediaType string, artifacts []Artifact) (Result, error) {
+func writeResult(source, outputDir, mediaType, textPath string, artifacts []Artifact) (Result, error) {
 	digest, err := hashFile(source)
 	if err != nil {
 		return Result{}, err
 	}
 	warnings := []string{}
 	manifest := Manifest{
-		SchemaVersion: 2, ConverterVersion: "2026.09.0",
+		SchemaVersion: 3, ConverterVersion: "2026.09.0",
 		Source:    ManifestSource{MediaType: mediaType, SHA256: digest},
-		Documents: []ManifestDocument{{Name: filepath.Base(source), Parts: artifacts}},
+		Documents: []ManifestDocument{{Name: filepath.Base(source), TextPath: textPath, Parts: artifacts}},
 		Warnings:  warnings,
 	}
 	encoded, err := json.MarshalIndent(manifest, "", "  ")

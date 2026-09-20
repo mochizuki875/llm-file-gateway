@@ -38,10 +38,6 @@ func (server *Server) handleInference(response http.ResponseWriter, request *htt
 		writeError(response, apierror.New(404, "model_not_found", "The requested model is not available.", "model"))
 		return
 	}
-	if endpoint == "responses" && payload["previous_response_id"] != nil {
-		writeError(response, apierror.New(400, "unsupported_feature", "previous_response_id is not supported in the MVP.", "previous_response_id"))
-		return
-	}
 	temporary := make([]string, 0)
 	defer func() {
 		for _, directory := range temporary {

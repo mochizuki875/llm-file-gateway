@@ -122,7 +122,7 @@ func (service *Service) Create(ctx context.Context, filename string, source io.R
 }
 
 func (service *Service) Delete(ctx context.Context, id, tenantID string) (bool, error) {
-	record, err := service.store.MarkDeleted(ctx, id, tenantID)
+	record, err := service.store.Get(ctx, id, tenantID)
 	if err != nil {
 		return false, err
 	}
@@ -132,6 +132,10 @@ func (service *Service) Delete(ctx context.Context, id, tenantID string) (bool, 
 	}
 	if err := os.RemoveAll(filepath.Dir(filepath.Join(service.settings.DataDir, record.SourcePath))); err != nil {
 		return false, err
+	}
+	deleted, err := service.store.Delete(ctx, id, tenantID)
+	if err != nil || !deleted {
+		return deleted, err
 	}
 	slog.Info("file deleted", "file_id", id, "filename", record.Filename)
 	return true, nil
@@ -227,6 +231,7 @@ func (service *Service) convert(ctx context.Context, id string) {
 
 func (service *Service) janitor(ctx context.Context) {
 	defer service.wait.Done()
+	service.deleteExpired(ctx)
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -234,16 +239,24 @@ func (service *Service) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			expired, err := service.store.Expired(ctx)
-			if err != nil {
-				slog.Warn("expired file lookup failed", "error", err)
-				continue
-			}
-			for _, record := range expired {
-				if _, err := service.Delete(ctx, record.ID, record.TenantID); err != nil {
-					slog.Warn("expired file deletion failed", "file_id", record.ID, "error", err)
-				}
-			}
+			service.deleteExpired(ctx)
+		}
+	}
+}
+
+func (service *Service) deleteExpired(ctx context.Context) {
+	expired, err := service.store.Expired(ctx)
+	if err != nil {
+		slog.Warn("expired file lookup failed", "error", err)
+		return
+	}
+	for _, record := range expired {
+		if err := os.RemoveAll(filepath.Dir(filepath.Join(service.settings.DataDir, record.SourcePath))); err != nil {
+			slog.Warn("expired file cleanup failed", "file_id", record.ID, "error", err)
+			continue
+		}
+		if _, err := service.store.Delete(ctx, record.ID, record.TenantID); err != nil {
+			slog.Warn("expired file deletion failed", "file_id", record.ID, "error", err)
 		}
 	}
 }

@@ -4,12 +4,14 @@ import os
 import time
 from pathlib import Path
 
-from openai import OpenAI
+from openai import NotFoundError, OpenAI
 
-DOCUMENT_PATH = Path(__file__).with_name("samplefile.ppt")
+# DOCUMENT_PATH = Path(__file__).with_name("samplefile.docx")
+DOCUMENT_PATH = Path(__file__).with_name("samplefile2.xlsx")
 POLL_INTERVAL_SECONDS = 0.5
-PROCESSING_TIMEOUT_SECONDS = 300.0
-SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
+PROCESSING_TIMEOUT_SECONDS = 600.0
+# SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
+SUMMARY_PROMPT = "このバランスシートの内容は健全ですか？"
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "253952"))
 
 
@@ -32,6 +34,18 @@ def wait_until_processed(client: OpenAI, file_id: str) -> None:
     raise TimeoutError(f"File processing timed out: {file_id}")
 
 
+def delete_file(client: OpenAI, file_id: str, expires_at: int | None) -> None:
+    if expires_at is not None and time.time() >= expires_at:
+        print(f"Already expired: {file_id}")
+        return
+    try:
+        client.files.delete(file_id)
+    except NotFoundError:
+        print(f"Already expired: {file_id}")
+        return
+    print(f"Deleted: {file_id}")
+
+
 def main() -> None:
     if not DOCUMENT_PATH.is_file():
         raise RuntimeError(f"Document not found: {DOCUMENT_PATH}")
@@ -45,7 +59,14 @@ def main() -> None:
 
     try:
         with DOCUMENT_PATH.open("rb") as document:
-            uploaded_file = client.files.create(file=document, purpose="user_data")
+            uploaded_file = client.files.create(
+                file=document, 
+                purpose="user_data",
+                expires_after={
+                        "anchor": "created_at",
+                        "seconds": 600,
+                    },
+                )
         print(f"Uploaded: {uploaded_file.id}")
 
         wait_until_processed(client, uploaded_file.id)
@@ -69,8 +90,7 @@ def main() -> None:
         print(response.output_text)
     finally:
         if uploaded_file is not None:
-            client.files.delete(uploaded_file.id)
-            print(f"Deleted: {uploaded_file.id}")
+            delete_file(client, uploaded_file.id, uploaded_file.expires_at)
 
 
 if __name__ == "__main__":
