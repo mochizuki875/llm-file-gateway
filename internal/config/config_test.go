@@ -8,6 +8,7 @@ import (
 func TestLoadDocumentTextExtraction(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
 
 	for _, test := range []struct {
 		name  string
@@ -41,6 +42,7 @@ func TestLoadDocumentTextExtraction(t *testing.T) {
 func TestLoadConversionWorkers(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
 
 	t.Run("default", func(t *testing.T) {
 		t.Setenv("CONVERSION_WORKERS", "")
@@ -77,6 +79,7 @@ func TestLoadConversionWorkers(t *testing.T) {
 func TestLoadLogVerbosity(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
 
 	for _, test := range []struct {
 		name  string
@@ -113,6 +116,7 @@ func TestLoadLogVerbosity(t *testing.T) {
 func TestLoadFileTTL(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
 
 	t.Run("default", func(t *testing.T) {
 		t.Setenv("FILE_TTL_SECONDS", "")
@@ -146,14 +150,24 @@ func TestLoadFileTTL(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresBothAuthenticationKeys(t *testing.T) {
+func TestLoadRequiresVLLMAPIKey(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
-	t.Setenv("GATEWAY_AUTH_REQUIRED", "true")
-	t.Setenv("GATEWAY_API_KEY", "gateway-key")
 	t.Setenv("VLLM_API_KEY", "")
 
-	if _, err := Load(); err == nil || err.Error() != "GATEWAY_API_KEY and VLLM_API_KEY are required when GATEWAY_AUTH_REQUIRED=true" {
+	if _, err := Load(); err == nil || err.Error() != "VLLM_API_KEY is required" {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestLoadRequiresGatewayAPIKeyWhenAuthenticationEnabled(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+	t.Setenv("GATEWAY_AUTH_REQUIRED", "true")
+	t.Setenv("GATEWAY_API_KEY", "")
+
+	if _, err := Load(); err == nil || err.Error() != "GATEWAY_API_KEY is required when GATEWAY_AUTH_REQUIRED=true" {
 		t.Fatalf("Load() error = %v", err)
 	}
 }

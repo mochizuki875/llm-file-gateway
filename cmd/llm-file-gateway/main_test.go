@@ -46,7 +46,7 @@ func TestNewLoggerFiltersByVerbosity(t *testing.T) {
 func TestNewLoggerNormalizesVerboseLevelName(t *testing.T) {
 	var output bytes.Buffer
 	logger := newLogger(&output, 2)
-	logger.Log(context.Background(), logging.Level(2), "trace message", "verbosity", 2)
+	logger.Log(context.Background(), logging.Level(2), "trace message")
 
 	if !strings.Contains(output.String(), "level=DEBUG") || strings.Contains(output.String(), "level=DEBUG-4") {
 		t.Fatalf("log output = %q, want level=DEBUG without slog level offset", output.String())

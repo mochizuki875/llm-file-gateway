@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -88,6 +89,28 @@ func TestPendingAndStatusUpdate(t *testing.T) {
 	}
 	if updated.Status != "processed" || updated.ManifestPath.String != "files/manifest.json" {
 		t.Fatalf("updated file = %#v", updated)
+	}
+}
+
+func TestConsolidateTenants(t *testing.T) {
+	dataStore, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	now := time.Now().Unix()
+	for index, tenantID := range []string{"tenant-a", "tenant-b"} {
+		file := testFile(fmt.Sprintf("file_%d", index), tenantID, now, now+3600)
+		if err := dataStore.Add(context.Background(), file); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dataStore.ConsolidateTenants(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	files, err := dataStore.List(context.Background(), SharedTenantID, 20, "desc", "")
+	if err != nil || len(files) != 2 {
+		t.Fatalf("shared files = %#v, %v; want 2 files", files, err)
 	}
 }
 

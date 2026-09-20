@@ -102,8 +102,11 @@ func Load() (Config, error) {
 		RequestTimeout:        time.Duration(timeoutSeconds * float64(time.Second)),
 		LogVerbosity:          logVerbosity,
 	}
-	if config.GatewayAuthRequired && (config.GatewayAPIKey == "" || config.VLLMAPIKey == "") {
-		return Config{}, fmt.Errorf("GATEWAY_API_KEY and VLLM_API_KEY are required when GATEWAY_AUTH_REQUIRED=true")
+	if config.VLLMAPIKey == "" {
+		return Config{}, fmt.Errorf("VLLM_API_KEY is required")
+	}
+	if config.GatewayAuthRequired && config.GatewayAPIKey == "" {
+		return Config{}, fmt.Errorf("GATEWAY_API_KEY is required when GATEWAY_AUTH_REQUIRED=true")
 	}
 	return config, nil
 }

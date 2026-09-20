@@ -23,6 +23,5 @@ func ReplaceLevel(_ []string, attribute slog.Attr) slog.Attr {
 }
 
 func V(ctx context.Context, verbosity int, message string, attributes ...any) {
-	attributes = append([]any{"verbosity", verbosity}, attributes...)
 	slog.Log(ctx, Level(verbosity), message, attributes...)
 }

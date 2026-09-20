@@ -44,6 +44,11 @@ func run() error {
 			slog.Warn("database close failed", "error", err)
 		}
 	}()
+	if !settings.GatewayAuthRequired {
+		if err := dataStore.ConsolidateTenants(context.Background()); err != nil {
+			return err
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

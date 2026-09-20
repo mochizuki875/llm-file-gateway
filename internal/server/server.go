@@ -198,17 +198,17 @@ func (server *Server) ownedFile(response http.ResponseWriter, request *http.Requ
 
 func (server *Server) tenantID(request *http.Request) (string, *apierror.Error) {
 	authorization := request.Header.Get("Authorization")
-	if server.settings.GatewayAuthRequired {
-		if !strings.HasPrefix(authorization, "Bearer ") {
-			return "", apierror.New(401, "invalid_api_key", "Missing bearer token.", "")
-		}
-		token := strings.TrimPrefix(authorization, "Bearer ")
-		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(server.settings.GatewayAPIKey)) != 1 {
-			return "", apierror.New(401, "invalid_api_key", "Invalid API key.", "")
-		}
+	if !server.settings.GatewayAuthRequired {
+		return store.SharedTenantID, nil
 	}
-	identity := strings.TrimPrefix(authorization, "Bearer ")
-	digest := sha256.Sum256([]byte(identity))
+	if !strings.HasPrefix(authorization, "Bearer ") {
+		return "", apierror.New(401, "invalid_api_key", "Missing bearer token.", "")
+	}
+	token := strings.TrimPrefix(authorization, "Bearer ")
+	if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(server.settings.GatewayAPIKey)) != 1 {
+		return "", apierror.New(401, "invalid_api_key", "Invalid API key.", "")
+	}
+	digest := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(digest[:])[:32], nil
 }
 
@@ -240,6 +240,9 @@ func writeError(response http.ResponseWriter, gatewayError *apierror.Error) {
 	var param any
 	if gatewayError.Param != "" {
 		param = gatewayError.Param
+	}
+	if gatewayError.Status >= http.StatusBadRequest && gatewayError.Status < http.StatusInternalServerError {
+		slog.Warn("request rejected", "status", gatewayError.Status, "code", gatewayError.Code, "param", param)
 	}
 	writeJSON(response, gatewayError.Status, map[string]any{"error": map[string]any{
 		"message": gatewayError.Message, "type": "invalid_request_error", "param": param, "code": gatewayError.Code,

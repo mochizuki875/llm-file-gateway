@@ -134,6 +134,28 @@ func TestMissingFileLogsWarning(t *testing.T) {
 	}
 }
 
+func TestValidationErrorLogsWarning(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	handler := NewHandler(settings, dataStore, service)
+	var output bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/files?limit=0", nil))
+
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnprocessableEntity)
+	}
+	logOutput := output.String()
+	for _, expected := range []string{"level=WARN", `msg="request rejected"`, "status=422", "code=invalid_request", "param=limit"} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("log output = %q, missing %q", logOutput, expected)
+		}
+	}
+}
+
 func TestInternalRequestErrorLogs(t *testing.T) {
 	settings, dataStore, service := testDependencies(t)
 	handler := NewHandler(settings, dataStore, service)
@@ -191,8 +213,8 @@ func TestResponsesExpandsInlineUnknownTextFormat(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if receivedAuthorization != "" {
-		t.Fatalf("upstream authorization = %q, want empty", receivedAuthorization)
+	if receivedAuthorization != "Bearer upstream-key" {
+		t.Fatalf("upstream authorization = %q, want VLLM API key", receivedAuthorization)
 	}
 	if response.Code != http.StatusOK {
 		t.Fatalf("responses status = %d: %s", response.Code, response.Body.String())
@@ -489,7 +511,7 @@ func TestPassthroughPreservesRequestAndResponse(t *testing.T) {
 	if receivedMethod != http.MethodPost || receivedQuery != "encoding_format=float&tag=one&tag=two" || receivedBody != `{"input":"hello"}` {
 		t.Fatalf("request = method=%q query=%q body=%q", receivedMethod, receivedQuery, receivedBody)
 	}
-	if receivedRequestID != "client-1" || receivedAuthorization != "Bearer client-key" {
+	if receivedRequestID != "client-1" || receivedAuthorization != "Bearer upstream-key" {
 		t.Fatalf("headers = request-id=%q authorization=%q", receivedRequestID, receivedAuthorization)
 	}
 
@@ -505,6 +527,21 @@ func TestSafeHTTPErrorOmitsURL(t *testing.T) {
 	err := &url.Error{Op: "Get", URL: "https://example.com/file?token=secret", Err: underlying}
 	if got := safeHTTPError(err); !errors.Is(got, underlying) || strings.Contains(got.Error(), "secret") {
 		t.Fatalf("safeHTTPError() = %q, want underlying error without URL", got)
+	}
+}
+
+func TestDisabledAuthenticationUsesSharedTenant(t *testing.T) {
+	server := &Server{}
+	requests := []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/v1/files", nil),
+		httptest.NewRequest(http.MethodGet, "/v1/files", nil),
+	}
+	requests[1].Header.Set("Authorization", "Bearer unverified-client-key")
+	for _, request := range requests {
+		tenantID, gatewayError := server.tenantID(request)
+		if gatewayError != nil || tenantID != store.SharedTenantID {
+			t.Fatalf("tenant = %q, error = %v; want %q, nil", tenantID, gatewayError, store.SharedTenantID)
+		}
 	}
 }
 
@@ -577,6 +614,7 @@ func testDependencies(t *testing.T) (config.Config, *store.Store, *files.Service
 	settings := config.Config{
 		DataDir: dataDir, FileTTL: 5 * time.Minute, MaxFileBytes: 1024,
 		MaxDocumentPages: 20, MaxDocumentTextChars: 500_000, ConversionWorkers: 2,
+		VLLMAPIKey: "upstream-key",
 	}
 	if err := os.Mkdir(filepath.Join(dataDir, "work"), 0o755); err != nil {
 		t.Fatal(err)

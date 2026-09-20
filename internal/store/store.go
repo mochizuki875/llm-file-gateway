@@ -33,6 +33,8 @@ type Store struct {
 	now      func() time.Time
 }
 
+const SharedTenantID = "shared"
+
 func Open(path string) (*Store, error) {
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -57,6 +59,13 @@ func OpenDataDir(dataDir string) (*Store, error) {
 
 func (store *Store) Close() error {
 	return store.database.Close()
+}
+
+func (store *Store) ConsolidateTenants(ctx context.Context) error {
+	if _, err := store.database.ExecContext(ctx, "UPDATE files SET tenant_id = ? WHERE tenant_id <> ?", SharedTenantID, SharedTenantID); err != nil {
+		return fmt.Errorf("consolidate file tenants: %w", err)
+	}
+	return nil
 }
 
 func (store *Store) Migrate(ctx context.Context) error {

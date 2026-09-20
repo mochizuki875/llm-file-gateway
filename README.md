@@ -5,31 +5,31 @@
 > [!WARNING]
 > 本プロジェクトはMVP実装です。評価・開発用途に使用してください。
 
-PDF、Office文書、テキスト、画像を[OpenAI Files API](https://developers.openai.com/api/reference/java/resources/files)互換のファイル入力としてvLLMへ渡すGo製Gatewayです。Files APIで保存した`file_id`、inline base64、公開HTTPS URLを抽出テキストとdata URL画像へ展開し、Responses APIまたはChat Completions APIへ転送します。
+[vLLMのAPI](https://docs.vllm.ai/en/stable/serving/online_serving/)を[OpenAI Files API](https://developers.openai.com/api/reference/resources/files)に対応させるGatewayです。
+PDF、Office文書、テキスト、画像などのファイルをOpenAI Files API互換のAPIでアップロードすると画像変換およびテキスト抽出が行われ、`file_id`が生成されます。
+生成された`file_id`をResponses APIまたはChat Completions APIに付加することで、バックエンドにFiles APIでアップロードしたファイルから変換された画像(base64)およびテキストを転送することができます。
 
 文書画像変換には[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)を使用します。
 
 ## Features
-
-- OpenAI互換のFiles API、Responses API、Chat Completions API
-- `file_id`、base64の`file_data`、公開HTTPSの`file_url`入力
-- PDF、Office文書、テキスト文書、画像を共通のcontent partへ変換
-- ファイル所有範囲をAuthorizationごとのtenantへ分離
-- SQLiteとローカルファイルシステムによる保存、非同期変換、期限切れ削除
+- OpenAI互換のFiles API
+- Responses API、Chat Completions APIへの`file_id`、base64の`file_data`、公開HTTPSの`file_url`によるファイル入力
+- `GATEWAY_API_KEY`によるGatewayでのToken認証
+  - ただし複数の`GATEWAY_API_KEY`による認証(マルチテナント)には未対応
 
 ## Supported APIs
 
-| API | Endpoint | Status |
-| --- | --- | --- |
-| Health | `GET /health` | Supported |
-| Create file | `POST /v1/files` | Supported |
-| List files | `GET /v1/files` | Supported |
-| Retrieve file | `GET /v1/files/{file_id}` | Supported |
-| Retrieve content | `GET /v1/files/{file_id}/content` | Supported |
-| Delete file | `DELETE /v1/files/{file_id}` | Supported |
-| Responses | `POST /v1/responses` | Supported |
-| Chat Completions | `POST /v1/chat/completions` | Supported |
-| Other vLLM APIs | `/v1/*` | Passed through |
+| API | Endpoint |
+| --- | --- |
+| Health | `GET /health` |
+| Create file | `POST /v1/files` |
+| List files | `GET /v1/files` |
+| Retrieve file | `GET /v1/files/{file_id}` |
+| Retrieve content | `GET /v1/files/{file_id}/content` |
+| Delete file | `DELETE /v1/files/{file_id}` |
+| Responses | `POST /v1/responses` |
+| Chat Completions | `POST /v1/chat/completions` |
+| Other vLLM APIs | `/v1/*` (Passed through)
 
 Files APIが所有するパスの未対応メソッドはvLLMへ転送せず、`405`を返します。
 
@@ -37,55 +37,26 @@ Files APIが所有するパスの未対応メソッドはvLLMへ転送せず、`
 
 | 種別 | 拡張子 | モデルへの入力 |
 | --- | --- | --- |
-| PDF | `.pdf` | 文書全体の抽出テキストとページ画像 |
-| Word | `.doc`, `.docx` | 文書全体の抽出テキストとページ画像 |
-| PowerPoint | `.ppt`, `.pptx` | 文書全体の抽出テキストとスライド画像 |
-| Excel | `.xls`, `.xlsx`, `.xlsm` | 文書全体の抽出テキストとシート画像 |
-| Text | `.txt`, `.md`, `.markdown`, `.json`, `.jsonl`, `.yaml`, `.yml`, `.go`など | UTF-8の内容をそのまま使用 |
-| Structured text | `.csv`, `.html`, `.htm` | 共通text converterでCSVを行形式、HTMLを可視テキストへ抽出 |
-| Image | `.jpeg`, `.jpg`, `.png` | 元形式の画像 |
+| PDF | `.pdf` | 文書全体の抽出テキストとページ画像を生成し、モデルへの入力として使用 |
+| Word | `.doc`, `.docx` | 文書全体の抽出テキストとページ画像を生成し、モデルへの入力として使用 |
+| PowerPoint | `.ppt`, `.pptx` | 文書全体の抽出テキストとスライド画像を生成し、モデルへの入力として使用 |
+| Excel | `.xls`, `.xlsx`, `.xlsm` | 文書全体の抽出テキストとシート画像を生成し、モデルへの入力として使用 |
+| Text | `.txt`, `.md`, `.markdown`, `.json`, `.jsonl`, `.yaml`, `.yml`, `.go`など | UTF-8の内容をテキストとして生成し、モデルへの入力として使用 |
+| Structured text | `.csv`, `.html`, `.htm` | CSVを行形式に変換、HTMLから可視テキストを抽出しテキストを生成し、モデルへの入力として使用 |
+| Image | `.jpeg`, `.jpg`, `.png` | 元形式の画像をそのままモデルへの入力として使用 |
 
-テキスト形式は個別pluginを持たず、共通text converterで処理します。CSVとHTMLだけは同じconverterへ抽出関数を設定し、それ以外は内容をそのまま使用します。未知の拡張子や拡張子がないファイルも、有効なUTF-8でNUL byteを含まなければプレーンテキストとして処理します。PDFとOfficeのテキスト抽出は`document-image-renderer`へ委譲します。Office文書のマクロは実行しません。
+PDFとOffice形式ファイルのテキスト抽出および画像変換は`document-image-renderer`へ委譲します。Office文書のマクロは実行しません。
 
-`DOCUMENT_TEXT_EXTRACTION_ENABLED=false`にすると、PDFとOfficeは画像だけをモデルへ送ります。テキスト、CSV、HTMLはテキスト自体が入力内容であるため、この設定にかかわらず従来どおり処理します。
+`DOCUMENT_TEXT_EXTRACTION_ENABLED=false`にすると、PDFとOfficeは画像だけをモデルへ送ります。
 
-## How It Works
-
-```mermaid
-flowchart LR
-  Client[OpenAI SDK / HTTP client]
-  API[Go HTTP Gateway]
-  Queue[Conversion queue]
-  Converter[Format converter]
-  Renderer[document-image-renderer]
-  Storage[(SQLite + local files)]
-  VLLM[vLLM multimodal model]
-
-  Client -->|Files / Responses / Chat| API
-  API --> Queue
-  Queue --> Converter
-  Converter -. PDF / Office .-> Renderer
-  Converter --> Storage
-  API --> Storage
-  API -->|Prompt + text + data URL images| VLLM
-  VLLM --> API
-  API --> Client
-```
-
-1. Files APIがファイルを保存し、`status: "uploaded"`を返します。
-2. バックグラウンドworkerが形式別converterを選択し、text/image artifactを生成します。
-3. 変換完了後、Fileオブジェクトが`status: "processed"`になります。
-4. ResponsesまたはChat Completionsのファイル参照を、抽出テキストとdata URL画像へ展開します。
-5. 展開後のリクエストを同種のvLLM APIへ転送します。
-
-元文書とGatewayの`file_id`はvLLMへ渡しません。inlineの`file_data`と`file_url`はリクエスト中だけ一時保存し、応答またはエラーの後に削除します。Files APIで保存したファイルは`FILE_TTL_SECONDS`後に削除します。
+テキスト形式は個別pluginを持たず、共通text converterで処理します。(CSVとHTMLだけは同じconverterへ抽出関数を設定)。未知の拡張子や拡張子がないファイルも、有効なUTF-8でNUL byteを含まなければプレーンテキストとして処理します。
 
 ## Requirements
 
 - Go 1.27以降
-- Office文書を変換する場合はLibreOffice
 - OpenAI互換APIを提供するvLLMサーバー
-- PDF、Office、画像を使う場合は画像入力対応モデル
+- PDF、Office、画像を使う場合はマルチモーダル対応モデル
+- [document-image-renderer](https://github.com/mochizuki875/document-image-renderer)の動作要件も確認してください
 
 PDF描画はPDFium/WASMを使用するため、CGOや外部PDFコマンドは不要です。Office文書の安定したレイアウトには、文書で使用されるフォントも必要です。Gatewayは特定モデル専用ではありませんが、画像数、context長、chat templateなどの制約は利用するモデルとvLLM構成に依存します。
 
@@ -105,6 +76,8 @@ cp .env.example .env
 
 ## Configuration
 
+Gatewayは設定値をプロセスの環境変数から読み取ります。
+
 | Environment variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `VLLM_MODEL` | Yes | - | クライアント要求で許可するモデル名 |
@@ -112,7 +85,7 @@ cp .env.example .env
 | `GATEWAY_ADDRESS` | No | `:8080` | Listen address |
 | `GATEWAY_AUTH_REQUIRED` | No | `false` | GatewayでBearer tokenを検証するか |
 | `GATEWAY_API_KEY` | Conditional | - | Gateway用キー |
-| `VLLM_API_KEY` | Conditional | - | vLLM転送用キー |
+| `VLLM_API_KEY` | Yes | - | vLLM転送用キー |
 | `GATEWAY_DATA_DIR` | No | `gateway-data` | SQLiteとファイルの保存先 |
 | `FILE_TTL_SECONDS` | No | `300` | ファイル保持秒数。正の整数で変更可能 |
 | `MAX_FILE_BYTES` | No | `52428800` | 1ファイルの最大サイズ |
@@ -124,13 +97,14 @@ cp .env.example .env
 | `REQUEST_TIMEOUT_SECONDS` | No | `300` | vLLM通信のtimeout。streamingではstream全体に適用 |
 | `LOGLEVEL` | No | `0` | ログverbosity（`0`: 通常、`1`: DEBUG、`2`: 高頻度の詳細ログ） |
 
-`GATEWAY_AUTH_REQUIRED=false`では、受信したAuthorizationをvLLMへそのまま転送します。`true`ではクライアントに`GATEWAY_API_KEY`を要求し、vLLMへ`VLLM_API_KEY`を送ります。
-
-Gatewayは設定値をプロセスの環境変数から読み取ります。`.env`をコードから直接読み込むことはありません。`GATEWAY_AUTH_REQUIRED=true`の場合、`GATEWAY_API_KEY`と`VLLM_API_KEY`のどちらかが未設定なら起動を拒否します。`GET /health`は認証対象外です。
-
-ログは標準エラーへ構造化されたtext形式で出力します。`LOGLEVEL`はKubernetesのverbosityと同様に、数字を上げるほど詳細になります。`0`はINFO/WARN/ERROR、`1`はrequest転送やresponse中断を含むDEBUG、`2`はqueue操作など高頻度の内部状態も追加します。V1/V2のlevel表示はどちらも`DEBUG`とし、`verbosity` fieldで区別します。文書本文、API key、完全な外部URLは記録しません。
+`GATEWAY_AUTH_REQUIRED=true`を設定した場合はGatewayでの認証が有効となり、`GATEWAY_API_KEY`の設定が必須となります。
+GatewayからvLLMへの認証は`VLLM_API_KEY`を用いて行われるため、Gatewayに送信された`OPENAI_API_KEY`は転送されません。(`VLLM_API_KEY`は常に必須です。)
+`GET /health`は認証対象外です。
 
 ## Running the Gateway
+
+`set -a`により、`.env`で定義した値を子プロセスの環境変数としてexportします。
+別のterminalから起動状態を確認します。
 
 ```bash
 set -a
@@ -140,8 +114,8 @@ set +a
 go run ./cmd/llm-file-gateway
 ```
 
-`set -a`により、`.env`で定義した値を子プロセスの環境変数としてexportします。
-別のterminalから起動状態を確認します。
+Gatewayにリクエストを送信します。
+`{"status":"ok"}`が返ればGatewayは起動しています。`GET /health`はプロセスの稼働だけを示し、SQLite、LibreOffice、vLLMへの接続性は検査しません。
 
 ```bash
 # Check the health of the Gateway
@@ -157,9 +131,11 @@ curl -sS --fail http://localhost:8080/v1/models \
   -H "Authorization: Bearer $CLIENT_API_KEY" | jq .
 ```
 
-`{"status":"ok"}`が返ればGatewayは起動しています。`GET /health`はプロセスの稼働だけを示し、SQLite、LibreOffice、vLLMへの接続性は検査しません。
-
 ## Docker
+
+公開ポートは`GATEWAY_PORT=18080 docker compose up --build -d`のように変更できます。
+
+Composeはカレントディレクトリの`.env`を展開してコンテナへ渡します。保存データを永続化するvolumeは既定のCompose構成に含まれないため、コンテナを削除するとSQLiteと保存ファイルも失われます。
 
 ```bash
 docker compose up --build -d
@@ -167,10 +143,6 @@ docker compose ps
 curl --fail http://localhost:8080/health
 docker compose down
 ```
-
-公開ポートは`GATEWAY_PORT=18080 docker compose up --build -d`のように変更できます。
-
-Composeはカレントディレクトリの`.env`を展開してコンテナへ渡します。保存データを永続化するvolumeは既定のCompose構成に含まれないため、コンテナを削除するとSQLiteと保存ファイルも失われます。
 
 ## Usage
 クライアントからはGatewayをOpenAI互換APIの接続先として使用します。
@@ -182,13 +154,13 @@ set -a
 set +a
 
 export OPENAI_BASE_URL=http://localhost:8080/v1
-export OPENAI_API_KEY="$GATEWAY_API_KEY"
+if [[ "${GATEWAY_AUTH_REQUIRED:-false}" == "true" ]]; then
+  export OPENAI_API_KEY="$GATEWAY_API_KEY"
+else
+  export OPENAI_API_KEY=unused
+fi
 export OPENAI_MODEL="$VLLM_MODEL"
 ```
-
-`GATEWAY_AUTH_REQUIRED=false`では`OPENAI_API_KEY`がvLLMへそのまま転送され、その値からFiles APIのtenant IDが導出されます。`true`では`OPENAI_API_KEY`に`GATEWAY_API_KEY`を指定し、GatewayがvLLMへ`VLLM_API_KEY`を送ります。
-
-Pythonサンプルは`OPENAI_API_KEY`を必須とします。任意認証かつvLLMが認証を要求しない場合も、ファイル所有範囲を安定させるため任意の非空文字列を指定してください。
 
 ### Python Client Example
 
@@ -252,7 +224,7 @@ curl --fail --silent -X DELETE "$OPENAI_BASE_URL/files/$FILE_ID" \
 
 ## Limits and Compatibility
 
-- 1ファイルの既定上限は50 MiBです。inlineデータとURL取得にも同じ`MAX_FILE_BYTES`を適用します。
+- 1ファイルの上限はデフォルト50 MiBです。inlineデータとURL取得にも同じ`MAX_FILE_BYTES`を適用します。
 - PDF/Officeの最大ページ数は`MAX_DOCUMENT_PAGES`、vLLMへ送る画像数は文書ごとに`MAX_DOCUMENT_IMAGES`で制限します。画像上限後のページも抽出テキストは送信します。
 - 抽出テキストはPDF、Office、すべてのテキスト形式を含めて`MAX_DOCUMENT_TEXT_CHARS`で制限します。
 - Files APIの`purpose`は`user_data`だけを受け付けます。`expires_after`を指定する場合は`{"anchor":"created_at","seconds":<FILE_TTL_SECONDS>}`と一致させる必要があります。
@@ -265,24 +237,6 @@ curl --fail --silent -X DELETE "$OPENAI_BASE_URL/files/$FILE_ID" \
 - OpenAI内部の文書変換、token使用量、回答品質との完全な一致は保証しません。
 - content part以外のJSON fieldは同種のvLLM APIへベストエフォートで転送します。実際の対応範囲はvLLM、モデル、chat template、tool parserに依存します。
 
-## Project Structure
-
-```text
-compose.yaml              Docker Compose設定
-Dockerfile                Gateway実行image
-go.mod                    Go moduleと依存version
-cmd/llm-file-gateway/     process lifecycleとHTTP server起動
-internal/
-  apierror/               OpenAI形式error
-  config/                 環境変数
-  converter/              plugin registry、dispatcher、pipeline、形式別converter
-  files/                  保存、conversion queue、worker、janitor
-  server/                 Files/Responses/Chat API、文書展開、公開URL取得、vLLM proxy
-  store/                  SQLite
-example/                  Go利用例とsample文書
-README.md                 利用方法
-DESIGN.md                 設計と実装境界
-```
 
 ### Adding a Format
 
@@ -315,12 +269,12 @@ make test-integration
 
 - 登録済み拡張子の基本signature、テキストのUTF-8とNUL byte、画像形式を検証します。
 - `file_url`はHTTPSの443番ポートと公開IPだけを許可し、redirectごとに再検証します。
-- 保存ファイルはAuthorizationから導出したtenantに分離し、`FILE_TTL_SECONDS`後（既定5分）に削除します。
+- 保存ファイルは`FILE_TTL_SECONDS`後（既定5分）に削除します。Gateway認証無効時の保存領域は全クライアントで共有されます。
 - 文書由来テキストを信頼しないようsystem instructionを追加します。
 - ログへ文書本文やAPI keyを明示的には出力しません。
 - `.env`と`gateway-data/`はGit管理対象外です。
 
-任意認証ではAuthorizationを検証せず、受信値のhashをtenant IDとして使用します。Authorizationがないリクエストは同じ匿名tenantを共有します。必須認証ではFiles APIを含む`/v1`全体でGateway keyを検証します。`GET /health`は認証対象外です。
+認証無効時はAuthorizationをFiles APIの所有範囲に使用せず、全リクエストが同じ保存領域を共有します。必須認証ではFiles APIを含む`/v1`全体でGateway keyを検証します。`GET /health`は認証対象外です。
 
 単一GatewayとローカルSQLiteを前提とします。conversion worker数はprocess内で変更できますが、複数replica間でqueueは共有しません。parserの完全なsandbox、rate limit、malware scan、保存時暗号化、TLS終端、高可用化は含みません。本番公開時はreverse proxyでTLS、追加認証、rate limit、request size制限を適用し、必要に応じて文書変換を隔離してください。
 

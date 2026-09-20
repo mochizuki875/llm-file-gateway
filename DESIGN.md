@@ -8,34 +8,46 @@ GatewayはOpenAI互換Files APIを所有し、保存またはinline指定され�
 
 ```mermaid
 flowchart LR
-  Client[OpenAI client]
-  HTTP[net/http server]
-  Queue[conversion queue]
-  Converter[converter registry]
+  Client[OpenAI SDK / HTTP client]
+  API[Go HTTP Gateway]
+  Queue[Conversion queue]
+  Converter[Format converter]
   Renderer[document-image-renderer]
-  Store[(SQLite + filesystem)]
-  VLLM[vLLM]
+  Storage[(SQLite + local files)]
+  VLLM[vLLM multimodal model]
 
-  Client --> HTTP
-  HTTP --> Queue
-  Queue --> Converter
-  Converter --> Renderer
-  Converter --> Store
-  HTTP --> Store
-  HTTP -->|text + data URL images| VLLM
+  Client -->|Files / Responses / Chat| API
+  API --> Queue
+  Queue <--> Worker
+  Worker --> Converter
+  Converter -. PDF / Office .-> Renderer
+  Converter --> Storage
+  API --> Storage
+  API -->|Prompt + text + data URL images| VLLM
+  VLLM --> API
+  API --> Client
 ```
+
+1. Files APIがファイルを保存し、`status: "uploaded"`を返します。
+2. バックグラウンドworkerが形式別converterを選択し、text/image artifactを生成します。
+3. 変換完了後、Fileオブジェクトが`status: "processed"`になります。
+4. ResponsesまたはChat Completionsのファイル参照を、抽出テキストとdata URL画像へ展開します。
+5. 展開後のリクエストを同種のvLLM APIへ転送します。
+
+元文書とGatewayの`file_id`はvLLMへ渡しません。inlineの`file_data`と`file_url`はリクエスト中だけ一時保存し、応答またはエラーの後に削除します。Files APIで保存したファイルは`FILE_TTL_SECONDS`後に削除します。
 
 ## Packages
 
 | Package | Responsibility |
 | --- | --- |
-| `cmd/llm-file-gateway` | lifecycle、signal、HTTP server |
+| `cmd/llm-file-gateway` | process lifecycleとHTTP server起動 |
 | `internal/config` | 環境変数の検証 |
 | `internal/store` | SQLite schemaとtenant-aware CRUD |
-| `internal/files` | 保存、変換queue、TTL、削除 |
-| `internal/converter` | 形式検証、抽出、描画、manifest |
-| `internal/server` | Files API、入力展開、認証、proxy |
+| `internal/files` | ファイルの保存、conversion queue、worker、janitor |
+| `internal/converter` | plugin registry、dispatcher、pipeline、形式別converter |
+| `internal/server` | Files/Responses/Chat API、文書展開、公開URL取得、vLLM proxy |
 | `internal/apierror` | OpenAI形式のerror |
+| `example` | Go利用例とsample文書 |
 
 `internal/server`はHTTP境界の責務を次のファイルへ分離する。
 
@@ -46,6 +58,7 @@ flowchart LR
 | `document.go` | file参照の解決、一時変換、content part生成 |
 | `file_url.go` | 公開HTTPS URLの検証、redirect、download |
 | `proxy.go` | vLLMへの転送、header処理、SSE flush |
+
 
 ## Converter Architecture
 
@@ -144,9 +157,9 @@ Responsesは`file_id`、`file_data`、`file_url`、Chatは`file_id`と`file_data
 
 ## Authentication
 
-任意認証ではAuthorizationをvLLMへ転送し、token hashをFiles APIのtenant IDとして使う。必須認証ではconstant-time比較でGateway keyを検証し、上流には別のvLLM keyを送る。Authorizationなしの任意認証requestは匿名tenantを共有する。
+認証無効時はクライアントのAuthorizationを検証せず、Files APIでは全requestが共有tenantを使う。起動時に既存のtenantも共有tenantへ集約する。必須認証ではconstant-time比較でGateway keyを検証する。どちらの場合もクライアントのAuthorizationは上流へ転送せず、vLLMには`VLLM_API_KEY`を送る。
 
-設定はprocessの環境変数から読み込み、Gateway自身は`.env`を読み込まない。local実行ではshellからexportし、Compose実行ではComposeが`.env`を展開してcontainerへ渡す。必須認証では`GATEWAY_API_KEY`と`VLLM_API_KEY`の両方を必須とし、不足時は起動を拒否する。`/v1`以下はFiles APIを含めて認証対象とするが、`GET /health`は認証せずプロセスの稼働状態だけを返す。
+設定はprocessの環境変数から読み込み、Gateway自身は`.env`を読み込まない。local実行ではshellからexportし、Compose実行ではComposeが`.env`を展開してcontainerへ渡す。`VLLM_API_KEY`は常に必須とし、必須認証では`GATEWAY_API_KEY`も要求する。`/v1`以下はFiles APIを含めて認証対象とするが、`GET /health`は認証せずプロセスの稼働状態だけを返す。
 
 ## Proxy
 
@@ -154,7 +167,7 @@ Files、Responses、Chat以外の`/v1/*`はmethod、query、body、end-to-end he
 
 ## Logging
 
-`log/slog`の構造化text logを標準エラーへ出力する。公開設定`LOGLEVEL`はseverityではなく昇順のverbosityとし、`0`はINFO以上、`1`はDEBUG以上、`2`はqueue操作など高頻度の内部状態も含める。内部ではverbosityごとにslog levelを4ずつ下げてfilterするが、出力時はV1/V2ともlevel名を`DEBUG`へ正規化し、`verbosity` fieldで区別する。WARNは回復可能な欠落・cleanup・外部URL取得失敗、ERRORはDB、artifact、変換、vLLM通信など処理を完了できない内部・依存障害に使う。通常の入力検証4xxは原則として記録せず、運用調査が必要な`file_not_found`だけWARNとする。文書本文、API key、完全な外部URLはfieldへ含めない。
+`log/slog`の構造化text logを標準エラーへ出力する。公開設定`LOGLEVEL`はseverityではなく昇順のverbosityとし、`0`はINFO以上、`1`はDEBUG以上、`2`はqueue操作など高頻度の内部状態も含める。内部ではverbosityごとにslog levelを4ずつ下げてfilterするが、出力時はV1/V2ともlevel名を`DEBUG`へ正規化する。WARNは4xxの入力検証・回復可能な欠落・cleanup・外部URL取得失敗、ERRORはDB、artifact、変換、vLLM通信など処理を完了できない内部・依存障害に使う。4xxログにはHTTP status、error code、paramを含める。文書本文、API key、完全な外部URLはfieldへ含めない。
 
 ## Operational Boundary
 

@@ -45,7 +45,7 @@ func (server *Server) passthrough(response http.ResponseWriter, request *http.Re
 	}
 	copyHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Del("Authorization")
-	if authorization := server.upstreamAuthorization(request); authorization != "" {
+	if authorization := server.upstreamAuthorization(); authorization != "" {
 		upstreamRequest.Header.Set("Authorization", authorization)
 	}
 	logging.V(request.Context(), 1, "forwarding upstream request", "method", request.Method, "path", request.URL.Path)
@@ -85,10 +85,9 @@ func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Re
 	upstreamURL := strings.TrimRight(server.settings.VLLMBaseURL.String(), "/") + "/" + endpoint
 	upstreamRequest, _ := http.NewRequestWithContext(request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(content))
 	upstreamRequest.Header.Set("Content-Type", "application/json")
-	if authorization := server.upstreamAuthorization(request); authorization != "" {
+	if authorization := server.upstreamAuthorization(); authorization != "" {
 		upstreamRequest.Header.Set("Authorization", authorization)
 	}
-	logging.V(request.Context(), 1, "forwarding inference request", "endpoint", endpoint)
 	upstream, err := server.client.Do(upstreamRequest)
 	if err != nil {
 		slog.Error("upstream inference request failed", "endpoint", endpoint, "error", safeHTTPError(err))
@@ -161,11 +160,8 @@ func (writer flushWriter) Write(content []byte) (int, error) {
 	return written, nil
 }
 
-func (server *Server) upstreamAuthorization(request *http.Request) string {
-	if server.settings.GatewayAuthRequired {
-		return "Bearer " + server.settings.VLLMAPIKey
-	}
-	return request.Header.Get("Authorization")
+func (server *Server) upstreamAuthorization() string {
+	return "Bearer " + server.settings.VLLMAPIKey
 }
 
 func safeHTTPError(err error) error {

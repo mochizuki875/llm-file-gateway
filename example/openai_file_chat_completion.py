@@ -6,7 +6,7 @@ from pathlib import Path
 
 from openai import NotFoundError, OpenAI
 
-DOCUMENT_PATH = Path(__file__).with_name("samplefile.pptx")
+DOCUMENT_PATH = Path(__file__).with_name("samplefile.docx")
 POLL_INTERVAL_SECONDS = 0.5
 PROCESSING_TIMEOUT_SECONDS = 600.0
 SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
@@ -58,34 +58,34 @@ def main() -> None:
     try:
         with DOCUMENT_PATH.open("rb") as document:
             uploaded_file = client.files.create(
-                file=document, 
+                file=document,
                 purpose="user_data",
                 expires_after={
-                        "anchor": "created_at",
-                        "seconds": 600,
-                    },
-                )
+                    "anchor": "created_at",
+                    "seconds": 600,
+                },
+            )
         print(f"Uploaded: {uploaded_file.id}")
 
         wait_until_processed(client, uploaded_file.id)
         print(f"Processed: {uploaded_file.id}")
 
-        response = client.responses.create(
+        completion = client.chat.completions.create(
             model=model,
-            input=[
+            messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_file", "file_id": uploaded_file.id},
-                        {"type": "input_text", "text": SUMMARY_PROMPT},
+                        {"type": "file", "file": {"file_id": uploaded_file.id}},
+                        {"type": "text", "text": SUMMARY_PROMPT},
                     ],
                 }
             ],
-            max_output_tokens=MAX_OUTPUT_TOKENS,
+            max_tokens=MAX_OUTPUT_TOKENS,
         )
-        if not response.output_text:
-            raise RuntimeError(f"The Responses API returned no summary: status={response.status}")
-        print(response.output_text)
+        if not completion.choices or not completion.choices[0].message.content:
+            raise RuntimeError("The Chat Completions API returned no summary")
+        print(completion.choices[0].message.content)
     finally:
         if uploaded_file is not None:
             delete_file(client, uploaded_file.id, uploaded_file.expires_at)
