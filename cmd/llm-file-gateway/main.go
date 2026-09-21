@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mochizuki875/llm-file-gateway/internal/config"
+	"github.com/mochizuki875/llm-file-gateway/internal/converter"
 	"github.com/mochizuki875/llm-file-gateway/internal/files"
 	"github.com/mochizuki875/llm-file-gateway/internal/logging"
 	"github.com/mochizuki875/llm-file-gateway/internal/server"
@@ -52,7 +53,11 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	fileService := files.New(settings, dataStore)
+	registry, err := converter.NewDefaultRegistry()
+	if err != nil {
+		return err
+	}
+	fileService := files.New(settings, dataStore, converter.NewDispatcher(registry))
 	if err := fileService.Start(ctx); err != nil {
 		return err
 	}

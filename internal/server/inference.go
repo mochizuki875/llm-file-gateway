@@ -96,7 +96,7 @@ func (server *Server) expandResponses(ctx context.Context, payload map[string]an
 				continue
 			}
 			param := fmt.Sprintf("input[%d].content[%d]", itemIndex, partIndex)
-			document, err := server.resolveDocument(ctx, part, tenantID, param, temporary)
+			document, err := server.prepareDocument(ctx, part, tenantID, param, temporary)
 			if err != nil {
 				return err
 			}
@@ -140,7 +140,7 @@ func (server *Server) expandChat(ctx context.Context, payload map[string]any, te
 			if fileURL, ok := reference["file_url"].(string); ok && fileURL != "" {
 				return apierror.New(400, "invalid_file_reference", "file_url is not supported by Chat Completions.", param+".file_url")
 			}
-			document, err := server.resolveDocument(ctx, reference, tenantID, param, temporary)
+			document, err := server.prepareDocument(ctx, reference, tenantID, param, temporary)
 			if err != nil {
 				return err
 			}

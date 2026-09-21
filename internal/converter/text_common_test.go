@@ -24,7 +24,7 @@ func TestTextConverters(t *testing.T) {
 			if err := os.WriteFile(source, []byte(test.content), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			result, err := Convert(context.Background(), source, filepath.Join(root, "derived"), Options{MaxPages: 20, MaxTextChars: 500_000})
+			result, err := convertForTest(context.Background(), source, filepath.Join(root, "derived"), Options{MaxPages: 20, MaxTextChars: 500_000})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,10 +48,19 @@ func TestRejectsInvalidTextAndUnsupportedFiles(t *testing.T) {
 	if err := os.WriteFile(invalid, []byte{0xff, 0xfe}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Validate(invalid); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+	dispatcher := newDefaultDispatcherForTest()
+	documentConverter, err := dispatcher.ResolveConverter(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := documentConverter.Validate(invalid); err == nil || !strings.Contains(err.Error(), "UTF-8") {
 		t.Fatalf("invalid UTF-8 error = %v", err)
 	}
-	if Supported(".rtf") {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Converter(".rtf"); err == nil {
 		t.Fatal(".rtf unexpectedly supported")
 	}
 }
@@ -65,10 +74,11 @@ func TestUnknownTextFormatsUsePlainTextFallback(t *testing.T) {
 			if err := os.WriteFile(source, []byte(want), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if mediaType, err := MediaType(filepath.Ext(name)); err != nil || mediaType != "text/plain" {
-				t.Fatalf("MediaType() = %q, %v; want text/plain", mediaType, err)
+			documentConverter, err := newDefaultDispatcherForTest().ResolveConverter(name)
+			if err != nil || documentConverter.MediaType() != "text/plain" {
+				t.Fatalf("converter = %#v, %v; want text/plain", documentConverter, err)
 			}
-			result, err := Convert(context.Background(), source, filepath.Join(root, "derived"), Options{MaxTextChars: 500_000})
+			result, err := convertForTest(context.Background(), source, filepath.Join(root, "derived"), Options{MaxTextChars: 500_000})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -87,7 +97,11 @@ func TestUnknownTextFormatsUsePlainTextFallback(t *testing.T) {
 	if err := os.WriteFile(binary, []byte{'P', 'K', 0, 1, 2}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Validate(binary); err == nil || !strings.Contains(err.Error(), "null bytes") {
+	documentConverter, err := newDefaultDispatcherForTest().ResolveConverter(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := documentConverter.Validate(binary); err == nil || !strings.Contains(err.Error(), "null bytes") {
 		t.Fatalf("binary validation error = %v", err)
 	}
 }

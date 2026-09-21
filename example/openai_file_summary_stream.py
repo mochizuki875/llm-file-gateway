@@ -8,8 +8,9 @@ from openai import NotFoundError, OpenAI
 
 DOCUMENT_PATH = Path(__file__).with_name("samplefile.xlsx")
 POLL_INTERVAL_SECONDS = 0.5
-PROCESSING_TIMEOUT_SECONDS = 300.0
-SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
+PROCESSING_TIMEOUT_SECONDS = 600.0
+# SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
+SUMMARY_PROMPT = "この家計の重大な問題点を指摘してください"
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "253952"))
 
 

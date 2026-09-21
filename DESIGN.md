@@ -62,7 +62,9 @@ flowchart LR
 
 ## Converter Architecture
 
-converterは、PDF、Office、画像など専用処理が必要な形式のpluginと、全テキスト形式を扱う共通`textConverter`で構成する。形式追加時にdispatcherやpipelineへ分岐を追加しない。
+converterは、PDF、Office、画像など専用処理が必要な形式のpluginと、全テキスト形式を扱う共通`textConverter`で構成する。PDFとOffice形式ファイルのテキスト抽出および画像変換は`document-image-renderer`へ委譲する。テキスト形式は個別pluginを持たず、共通text converterで処理する。(CSVとHTMLだけは同じconverterへ抽出関数を設定)。
+未知の拡張子や拡張子がないファイルも、有効なUTF-8でNUL byteを含まなければプレーンテキストとして処理する。
+形式追加時にdispatcherやpipelineへ分岐を追加しない。
 
 ```go
 type DocumentConverter interface {
@@ -77,7 +79,7 @@ type DocumentConverter interface {
 | --- | --- |
 | `base.go` | interface、options、result、artifact、limit error |
 | `registry.go` | 専用pluginとtext converter設定の登録、拡張子の正規化、検索 |
-| `dispatcher.go` | 登録済み形式を選択し、未知拡張子は共通text converterへ委譲 |
+| `dispatcher.go` | pathからconverterを解決し、未知拡張子は共通text converterへ委譲 |
 | `pipeline.go` | rendered/text/imageの共通pipelineとmanifest生成 |
 | `<extension>.go` | PDF、Office、画像など専用処理が必要な形式のplugin |
 | `office_common.go` | Office pluginが共有するsignatureとpipeline helper |
@@ -85,7 +87,7 @@ type DocumentConverter interface {
 | `image_common.go` | image pluginが共有するdecodeとconversion helper |
 | `validation.go` | signature検証の共通部品 |
 
-registryだけが標準plugin一覧を知り、dispatcherは形式別条件分岐を持たない。PDF、Office、画像のplugin instanceは拡張子ごとの検証と変換を所有する。テキスト形式はすべて同じ`textConverter`型を使い、拡張子、media type、extractorだけをregistryで設定する。CSVはCSV extractor、HTML/HTMはHTML extractor、それ以外はplain text extractorを使う。未登録の拡張子と拡張子なしのファイルもplain text extractorへfallbackし、有効なUTF-8かつNUL byteなしの場合だけ受理する。
+registryだけが標準plugin一覧を知り、dispatcherは形式別条件分岐を持たずconverterの解決だけを行う。`NewDefaultRegistry`をprocess起動時に呼び、生成したdispatcherをFiles serviceへ注入する。package globalのregistryやdispatcherは持たない。検証と変換は解決済みの`DocumentConverter`を呼び出す。PDF、Office、画像のplugin instanceは拡張子ごとの検証と変換を所有する。テキスト形式はすべて同じ`textConverter`型を使い、拡張子、media type、extractorだけをregistryで設定する。CSVはCSV extractor、HTML/HTMはHTML extractor、それ以外はplain text extractorを使う。未登録の拡張子と拡張子なしのファイルもplain text extractorへfallbackし、有効なUTF-8かつNUL byteなしの場合だけ受理する。
 
 Goでは動的module loadingではなく、明示的なcompile-time登録を採用する。`NewRegistry`はtestや将来の構成差し替えにも利用でき、同一拡張子の二重登録をerrorにする。
 
@@ -103,7 +105,7 @@ stateDiagram-v2
   failed --> deleted
 ```
 
-Files APIは保存後に`uploaded`を返す。`CONVERSION_WORKERS`個のworkerが変換し、manifestを永続化して`processed`へ更新する。worker数の既定値は2で、正の整数に変更できる。保持期限は作成時刻から`FILE_TTL_SECONDS`後で、既定値は300秒とする。正の整数で変更でき、Files API実行時に`expires_after`を指定する場合は`FILE_TTL_SECONDS`よりも短い値とする必要がある。Gatewayの再起動時には、SQLiteに残っている有効期限内の`uploaded`または`processing`状態のfile IDを変換queueへ追加し、変換を最初から再実行する。janitorは期限切れレコードと関連directoryを物理削除する。
+Files APIは保存後に`uploaded`を返す。`CONVERSION_WORKERS`個のworkerが変換し、manifestを永続化して`processed`へ更新する。worker数の既定値は2で、正の整数に変更できる。保持期限は作成時刻から`expires_after.seconds`後とし、未指定時は`FILE_TTL_SECONDS`（既定300秒）を使用する。`expires_after`は`anchor=created_at`と1秒以上`FILE_TTL_SECONDS`以下の秒数を要求する。Gatewayの再起動時には、SQLiteに残っている有効期限内の`uploaded`または`processing`状態のfile IDを変換queueへ追加し、変換を最初から再実行する。janitorは期限切れレコードと関連directoryを物理削除し、成功をDEBUG levelで記録する。
 
 ```mermaid
 sequenceDiagram
@@ -131,15 +133,15 @@ sequenceDiagram
   Worker->>Store: status=processed
 ```
 
-queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworker goroutineが共有する。起動時はSQLiteから有効期限内の`uploaded`または`processing`状態のfile IDを取得してqueueへ追加し、変換を最初から再実行する。workerとは別のjanitor goroutineが30秒ごとに期限切れfileを削除する。停止時は共通contextをcancelし、すべてのgoroutineの終了を待つ。
+queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworker goroutineが共有する。新規uploadでは最初に解決した`DocumentConverter`をfile IDとともにqueueへ追加し、workerで再解決しない。起動時はSQLiteから有効期限内の`uploaded`または`processing`状態のfile IDを取得してqueueへ追加し、source pathからconverterを一度解決して変換を最初から再実行する。workerとは別のjanitor goroutineが30秒ごとに期限切れfileを削除する。停止時は共通contextをcancelし、すべてのgoroutineの終了を待つ。
 
 ## Conversion
 
 入力は選択されたpluginが拡張子に対応する基本signatureを検証する。PDFとOfficeは`document-image-renderer`の`pkg/renderer.RenderDocument`で150 DPI PNGへ描画し、抽出が有効な場合は`ExtractDocumentWithOptions`でテキストも取得する。どちらもLibreOffice timeoutは300秒とする。rendererはPDFをPDFium/WASMで直接処理し、Officeを必要に応じてLibreOfficeで一時変換する。DOC/DOCXはページ、PPT/PPTXはスライド、XLS/XLSX/XLSMはworksheetが画像単位となる。
 
-Gatewayはrendererの既定値をそのまま使わず、`DefaultRenderOptions`を取得して必要なfieldだけを上書きする。rendererはページ単位で画像を保存し、途中失敗時に既生成画像を残す。また出力directory内の無関係なfileを削除しない。このためGatewayは専有する`derived` directoryと同階層の`manifest.json`を変換開始前に初期化し、変換が完了しなければ両方を削除する。rendererが返す`UnsupportedFormatError`、`DependencyNotFoundError`、`DocumentConversionError`、`DocumentRenderError`を含む変換errorはconverterから呼び出し元へ伝播する。
+Gatewayは`document-image-renderer`の既定値をそのまま使わず、`DefaultRenderOptions`を取得して必要なfieldだけを上書きする。`document-image-renderer`はページ単位で画像を保存し、途中失敗時に既生成画像を残す。また出力directory内の無関係なfileを削除しない。このためGatewayは専有する`derived` directoryと同階層の`manifest.json`を変換開始前に初期化し、変換が完了しなければ両方を削除する。`document-image-renderer`が返す`UnsupportedFormatError`、`DependencyNotFoundError`、`DocumentConversionError`、`DocumentRenderError`を含む変換errorはconverterから呼び出し元へ伝播する。
 
-PDFと全Office形式のテキスト抽出はrendererへ委譲し、Gatewayは`ExtractResult.Text()`で結合した文書全体のテキストを一つのartifactとして保存する。rendererは抽出text partと描画画像の対応を保証しないため、テキストへpage、slide、sheet番号を割り当てない。描画画像は元文書のページ、スライド、シート単位のartifactとして順序と番号を保持する。`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とし、`false`の場合はrendererの抽出処理を呼ばず、PDFとOfficeを画像だけのcontent partへ展開する。テキスト系は入力内容そのものであるため設定対象外とし、UTF-8を要求する。HTMLは非表示要素を除外し、未知拡張子のUTF-8テキストはplain textとして内容をそのまま保持する。JPEG/PNGは再圧縮しない。抽出を有効にした場合、文字数上限はtext-only形式だけでなく、PDFとOfficeにも描画前に適用する。
+PDFと全Office形式のテキスト抽出は`document-image-renderer`へ委譲し、Gatewayは`ExtractResult.Text()`で結合した文書全体のテキストを一つのartifactとして保存する。`document-image-renderer`は抽出text partと描画画像の対応を保証しないため、テキストへpage、slide、sheet番号を割り当てない。描画画像は元文書のページ、スライド、シート単位のartifactとして順序と番号を保持する。`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とし、`false`の場合は`document-image-renderer`の抽出処理を呼ばず、PDFとOfficeを画像だけのcontent partへ展開する。テキスト系は入力内容そのものであるため設定対象外とし、UTF-8を要求する。HTMLは非表示要素を除外し、未知拡張子のUTF-8テキストはplain textとして内容をそのまま保持する。JPEG/PNGは再圧縮しない。抽出を有効にした場合、文字数上限はtext-only形式だけでなく、PDFとOfficeにも描画前に適用する。
 
 成果物は`manifest.json`、文書単位の抽出text、part単位のimageで構成する。schema version 3ではdocumentの`text_path`と各image partを独立させる。Files API成果物は`GATEWAY_DATA_DIR/files/<tenant>/<file_id>`、inline入力は`work`以下へ置き、request終了時に削除する。
 

@@ -23,15 +23,28 @@ import (
 )
 
 type Service struct {
-	settings config.Config
-	store    *store.Store
-	queue    chan string
-	cancel   context.CancelFunc
-	wait     sync.WaitGroup
+	settings   config.Config
+	store      *store.Store
+	dispatcher *converter.Dispatcher
+	queue      chan conversionJob
+	cancel     context.CancelFunc
+	wait       sync.WaitGroup
 }
 
-func New(settings config.Config, dataStore *store.Store) *Service {
-	return &Service{settings: settings, store: dataStore, queue: make(chan string, 128)}
+type conversionJob struct {
+	id                string
+	documentConverter converter.DocumentConverter
+}
+
+func New(settings config.Config, dataStore *store.Store, dispatcher *converter.Dispatcher) *Service {
+	if dispatcher == nil {
+		panic("converter dispatcher must not be nil")
+	}
+	return &Service{settings: settings, store: dataStore, dispatcher: dispatcher, queue: make(chan conversionJob, 128)}
+}
+
+func (service *Service) ResolveConverter(path string) (converter.DocumentConverter, error) {
+	return service.dispatcher.ResolveConverter(path)
 }
 
 func (service *Service) Start(ctx context.Context) error {
@@ -47,7 +60,7 @@ func (service *Service) Start(ctx context.Context) error {
 	}
 	go service.janitor(workerContext)
 	for _, id := range pending {
-		service.enqueue(workerContext, id)
+		service.enqueue(workerContext, conversionJob{id: id})
 	}
 	slog.Info("file service started", "workers", service.settings.ConversionWorkers, "pending_files", len(pending))
 	return nil
@@ -61,10 +74,10 @@ func (service *Service) Stop() {
 	slog.Info("file service stopped")
 }
 
-func (service *Service) Create(ctx context.Context, filename string, source io.Reader, purpose, tenantID string) (*store.File, error) {
+func (service *Service) Create(ctx context.Context, filename string, source io.Reader, purpose, tenantID string, ttl time.Duration) (*store.File, error) {
 	safeName := filepath.Base(filename)
 	extension := strings.ToLower(filepath.Ext(safeName))
-	mediaType, err := converter.MediaType(extension)
+	documentConverter, err := service.dispatcher.ResolveConverter(safeName)
 	if err != nil {
 		return nil, apierror.New(400, "unsupported_file_type", "Unsupported file type.", "file")
 	}
@@ -102,21 +115,21 @@ func (service *Service) Create(ctx context.Context, filename string, source io.R
 	if written > service.settings.MaxFileBytes {
 		return nil, apierror.FileTooLarge(service.settings.MaxFileBytes, "file")
 	}
-	if err := converter.Validate(sourcePath); err != nil {
+	if err := documentConverter.Validate(sourcePath); err != nil {
 		return nil, apierror.New(400, "unsupported_file_type", err.Error(), "file")
 	}
 	now := time.Now().Unix()
 	record := &store.File{
-		ID: id, TenantID: tenantID, Filename: safeName, MediaType: mediaType,
+		ID: id, TenantID: tenantID, Filename: safeName, MediaType: documentConverter.MediaType(),
 		Purpose: purpose, Bytes: written, SHA256: hex.EncodeToString(digest.Sum(nil)),
 		Status: "uploaded", SourcePath: filepath.ToSlash(filepath.Join(relativeDir, "source"+extension)),
-		CreatedAt: now, ExpiresAt: now + int64(service.settings.FileTTL/time.Second),
+		CreatedAt: now, ExpiresAt: now + int64(ttl/time.Second),
 	}
 	if err := service.store.Add(ctx, *record); err != nil {
 		return nil, err
 	}
 	keepFiles = true
-	service.enqueue(ctx, id)
+	service.enqueue(ctx, conversionJob{id: id, documentConverter: documentConverter})
 	slog.Info("file accepted", "file_id", id, "filename", safeName, "bytes", written)
 	return record, nil
 }
@@ -169,10 +182,10 @@ func (service *Service) Resolve(ctx context.Context, id, tenantID, param string)
 	return record, manifest, nil
 }
 
-func (service *Service) enqueue(ctx context.Context, id string) {
+func (service *Service) enqueue(ctx context.Context, job conversionJob) {
 	select {
-	case service.queue <- id:
-		logging.V(ctx, 2, "file queued", "file_id", id)
+	case service.queue <- job:
+		logging.V(ctx, 2, "file queued", "file_id", job.id)
 	case <-ctx.Done():
 	}
 }
@@ -183,50 +196,61 @@ func (service *Service) worker(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case id := <-service.queue:
-			service.convert(ctx, id)
+		case job := <-service.queue:
+			service.convert(ctx, job)
 		}
 	}
 }
 
-func (service *Service) convert(ctx context.Context, id string) {
-	record, err := service.store.GetInternal(ctx, id)
+func (service *Service) convert(ctx context.Context, job conversionJob) {
+	record, err := service.store.GetInternal(ctx, job.id)
 	if err != nil {
-		slog.Error("queued file lookup failed", "file_id", id, "error", err)
+		slog.Error("queued file lookup failed", "file_id", job.id, "error", err)
 		return
 	}
 	if record == nil {
-		slog.Warn("queued file not found", "file_id", id)
+		slog.Warn("queued file not found", "file_id", job.id)
 		return
 	}
 	if record.DeletedAt.Valid {
-		logging.V(ctx, 2, "skipping deleted queued file", "file_id", id)
+		logging.V(ctx, 2, "skipping deleted queued file", "file_id", job.id)
 		return
 	}
-	if err := service.store.UpdateStatus(ctx, id, "processing", "", ""); err != nil {
-		slog.Error("document processing status update failed", "file_id", id, "error", err)
+	if err := service.store.UpdateStatus(ctx, job.id, "processing", "", ""); err != nil {
+		slog.Error("document processing status update failed", "file_id", job.id, "error", err)
 		return
 	}
 	source := filepath.Join(service.settings.DataDir, record.SourcePath)
+	documentConverter := job.documentConverter
+	if documentConverter == nil {
+		documentConverter, err = service.dispatcher.ResolveConverter(source)
+		if err != nil {
+			if statusErr := service.store.UpdateStatus(context.Background(), job.id, "failed", "", truncate(err.Error(), 1000)); statusErr != nil {
+				slog.Error("document failure status update failed", "file_id", job.id, "error", statusErr)
+			}
+			slog.Error("document converter resolution failed", "file_id", job.id, "error", err)
+			return
+		}
+	}
 	startedAt := time.Now()
-	slog.Info("document conversion started", "file_id", id, "filename", record.Filename)
-	_, err = converter.Convert(ctx, source, filepath.Join(filepath.Dir(source), "derived"), converter.Options{
+	slog.Info("document conversion started", "file_id", job.id, "filename", record.Filename)
+	_, err = documentConverter.Convert(ctx, source, filepath.Join(filepath.Dir(source), "derived"), converter.Options{
 		MaxPages: service.settings.MaxDocumentPages, MaxTextChars: service.settings.MaxDocumentTextChars,
 		DisableTextExtraction: !service.settings.TextExtractionEnabled,
 	})
 	if err != nil {
-		if statusErr := service.store.UpdateStatus(context.Background(), id, "failed", "", truncate(err.Error(), 1000)); statusErr != nil {
-			slog.Error("document failure status update failed", "file_id", id, "error", statusErr)
+		if statusErr := service.store.UpdateStatus(context.Background(), job.id, "failed", "", truncate(err.Error(), 1000)); statusErr != nil {
+			slog.Error("document failure status update failed", "file_id", job.id, "error", statusErr)
 		}
-		slog.Error("document conversion failed", "file_id", id, "error", err)
+		slog.Error("document conversion failed", "file_id", job.id, "error", err)
 		return
 	}
 	manifestPath := filepath.ToSlash(filepath.Join(filepath.Dir(record.SourcePath), "manifest.json"))
-	if err := service.store.UpdateStatus(context.Background(), id, "processed", manifestPath, ""); err != nil {
-		slog.Error("document conversion status update failed", "file_id", id, "error", err)
+	if err := service.store.UpdateStatus(context.Background(), job.id, "processed", manifestPath, ""); err != nil {
+		slog.Error("document conversion status update failed", "file_id", job.id, "error", err)
 		return
 	}
-	slog.Info("document conversion completed", "file_id", id, "parts_manifest", manifestPath, "duration_ms", time.Since(startedAt).Milliseconds())
+	slog.Info("document conversion completed", "file_id", job.id, "parts_manifest", manifestPath, "duration_ms", time.Since(startedAt).Milliseconds())
 }
 
 func (service *Service) janitor(ctx context.Context) {
@@ -255,8 +279,13 @@ func (service *Service) deleteExpired(ctx context.Context) {
 			slog.Warn("expired file cleanup failed", "file_id", record.ID, "error", err)
 			continue
 		}
-		if _, err := service.store.Delete(ctx, record.ID, record.TenantID); err != nil {
+		deleted, err := service.store.Delete(ctx, record.ID, record.TenantID)
+		if err != nil {
 			slog.Warn("expired file deletion failed", "file_id", record.ID, "error", err)
+			continue
+		}
+		if deleted {
+			slog.Debug("expired file deleted", "file_id", record.ID, "filename", record.Filename, "expires_at", record.ExpiresAt)
 		}
 	}
 }

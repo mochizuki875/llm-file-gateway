@@ -46,11 +46,15 @@ func TestRegistryAcceptsConverterPlugins(t *testing.T) {
 
 func TestDefaultRegistryContainsSupportedFormats(t *testing.T) {
 	want := []string{".csv", ".doc", ".docx", ".htm", ".html", ".jpeg", ".jpg", ".markdown", ".md", ".pdf", ".png", ".ppt", ".pptx", ".txt", ".xls", ".xlsm", ".xlsx"}
-	got := defaultRegistry.Extensions()
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := registry.Extensions()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("extensions = %v, want %v", got, want)
 	}
-	for extension, plugin := range defaultRegistry.byExtension {
+	for extension, plugin := range registry.byExtension {
 		if plugin.Extension() != extension {
 			t.Fatalf("plugin extension = %q, registry key = %q", plugin.Extension(), extension)
 		}

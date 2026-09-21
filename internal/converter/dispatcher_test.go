@@ -16,7 +16,17 @@ func TestDispatcherDelegatesToSelectedPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{MaxPages: 7, MaxTextChars: 1234}
-	result, err := NewDispatcher(registry).Convert(context.Background(), "document.CUSTOM", t.TempDir(), options)
+	documentConverter, err := NewDispatcher(registry).ResolveConverter("document.CUSTOM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if documentConverter != plugin || plugin.validateCalled || plugin.convertCalled {
+		t.Fatalf("resolved converter = %#v, calls = validate:%t convert:%t", documentConverter, plugin.validateCalled, plugin.convertCalled)
+	}
+	if err := documentConverter.Validate("document.CUSTOM"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := documentConverter.Convert(context.Background(), "document.CUSTOM", t.TempDir(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +43,7 @@ func TestImagePluginsPreserveOriginalFormat(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			source := filepath.Join("..", "..", "example", name)
 			output := filepath.Join(t.TempDir(), "derived")
-			result, err := Convert(context.Background(), source, output, Options{MaxPages: 20, MaxTextChars: 500_000})
+			result, err := convertForTest(context.Background(), source, output, Options{MaxPages: 20, MaxTextChars: 500_000})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -65,7 +75,7 @@ func TestPDFSampleExtractionAndRendering(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			output := filepath.Join(t.TempDir(), "derived")
-			result, err := Convert(context.Background(), source, output, Options{
+			result, err := convertForTest(context.Background(), source, output, Options{
 				MaxPages: 20, MaxTextChars: 500_000, DisableTextExtraction: test.disableText,
 			})
 			if err != nil {
@@ -78,12 +88,18 @@ func TestPDFSampleExtractionAndRendering(t *testing.T) {
 				t.Fatal("PDF artifact has no image")
 			}
 			textPath := result.Manifest.Documents[0].TextPath
+			if got := textPath != ""; got != test.wantText {
+				t.Fatalf("has text artifact = %t, want %t", got, test.wantText)
+			}
+			if textPath == "" {
+				return
+			}
 			text, err := os.ReadFile(filepath.Join(output, textPath))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := strings.TrimSpace(string(text)) != ""; got != test.wantText {
-				t.Fatalf("has extracted text = %t, want %t", got, test.wantText)
+			if strings.TrimSpace(string(text)) == "" {
+				t.Fatal("PDF text artifact is empty")
 			}
 		})
 	}
@@ -100,7 +116,7 @@ func TestOfficePluginSampleConversion(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			source := filepath.Join("..", "..", "example", name)
 			output := filepath.Join(t.TempDir(), "derived")
-			result, err := Convert(context.Background(), source, output, Options{MaxPages: 99, MaxTextChars: 500_000})
+			result, err := convertForTest(context.Background(), source, output, Options{MaxPages: 99, MaxTextChars: 500_000})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -122,4 +138,23 @@ func TestOfficePluginSampleConversion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func convertForTest(ctx context.Context, source, outputDir string, options Options) (Result, error) {
+	documentConverter, err := newDefaultDispatcherForTest().ResolveConverter(source)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := documentConverter.Validate(source); err != nil {
+		return Result{}, err
+	}
+	return documentConverter.Convert(ctx, source, outputDir, options)
+}
+
+func newDefaultDispatcherForTest() *Dispatcher {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		panic(err)
+	}
+	return NewDispatcher(registry)
 }

@@ -20,7 +20,7 @@ type resolvedDocument struct {
 	manifest   converter.Manifest
 }
 
-func (server *Server) resolveDocument(ctx context.Context, reference map[string]any, tenantID, param string, temporary *[]string) (resolvedDocument, error) {
+func (server *Server) prepareDocument(ctx context.Context, reference map[string]any, tenantID, param string, temporary *[]string) (resolvedDocument, error) {
 	sources := 0
 	for _, key := range []string{"file_id", "file_data", "file_url"} {
 		if value, ok := reference[key].(string); ok && value != "" {
@@ -72,7 +72,14 @@ func (server *Server) resolveDocument(ctx context.Context, reference map[string]
 	if err := os.WriteFile(source, content, 0o600); err != nil {
 		return resolvedDocument{}, err
 	}
-	result, err := converter.Convert(ctx, source, filepath.Join(directory, "derived"), converter.Options{
+	documentConverter, err := server.files.ResolveConverter(source)
+	if err != nil {
+		return resolvedDocument{}, err
+	}
+	if err := documentConverter.Validate(source); err != nil {
+		return resolvedDocument{}, apierror.New(400, "file_processing_failed", err.Error(), param)
+	}
+	result, err := documentConverter.Convert(ctx, source, filepath.Join(directory, "derived"), converter.Options{
 		MaxPages: server.settings.MaxDocumentPages, MaxTextChars: server.settings.MaxDocumentTextChars,
 		DisableTextExtraction: !server.settings.TextExtractionEnabled,
 	})

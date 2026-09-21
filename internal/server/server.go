@@ -66,23 +66,35 @@ func (server *Server) createFile(response http.ResponseWriter, request *http.Req
 	if purpose == "" {
 		purpose = "user_data"
 	}
-	if purpose != "user_data" {
-		writeError(response, apierror.New(400, "invalid_purpose", "Only purpose=user_data is supported.", "purpose"))
-		return
+	ttl := server.settings.FileTTL
+	var expiresAfter struct {
+		Anchor  string `json:"anchor"`
+		Seconds int64  `json:"seconds"`
 	}
+	expiresProvided := false
 	if expires := request.FormValue("expires_after"); expires != "" {
-		var value struct {
-			Anchor  string `json:"anchor"`
-			Seconds int64  `json:"seconds"`
+		expiresProvided = true
+		if json.Unmarshal([]byte(expires), &expiresAfter) != nil {
+			expiresAfter = struct {
+				Anchor  string `json:"anchor"`
+				Seconds int64  `json:"seconds"`
+			}{}
 		}
-		ttlSeconds := int64(server.settings.FileTTL / time.Second)
-		if json.Unmarshal([]byte(expires), &value) != nil || value.Anchor != "created_at" || value.Seconds != ttlSeconds {
-			message := fmt.Sprintf("Files expire %d seconds after creation.", ttlSeconds)
+	} else if anchor := request.FormValue("expires_after[anchor]"); anchor != "" || request.FormValue("expires_after[seconds]") != "" {
+		expiresProvided = true
+		expiresAfter.Anchor = anchor
+		expiresAfter.Seconds, _ = strconv.ParseInt(request.FormValue("expires_after[seconds]"), 10, 64)
+	}
+	if expiresProvided {
+		maxSeconds := int64(server.settings.FileTTL / time.Second)
+		if expiresAfter.Anchor != "created_at" || expiresAfter.Seconds < 1 || expiresAfter.Seconds > maxSeconds {
+			message := fmt.Sprintf("expires_after must use anchor=created_at and seconds between 1 and %d.", maxSeconds)
 			writeError(response, apierror.New(400, "invalid_expires_after", message, "expires_after"))
 			return
 		}
+		ttl = time.Duration(expiresAfter.Seconds) * time.Second
 	}
-	record, err := server.files.Create(request.Context(), header.Filename, input, purpose, tenantID)
+	record, err := server.files.Create(request.Context(), header.Filename, input, purpose, tenantID, ttl)
 	if err != nil {
 		writeAnyError(response, request, err)
 		return

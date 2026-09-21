@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mochizuki875/llm-file-gateway/internal/config"
+	"github.com/mochizuki875/llm-file-gateway/internal/converter"
 	"github.com/mochizuki875/llm-file-gateway/internal/store"
 )
 
@@ -27,7 +28,7 @@ func TestResolveMissingFileLogsWarning(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
-	service := New(config.Config{DataDir: dataDir}, dataStore)
+	service := New(config.Config{DataDir: dataDir}, dataStore, testDispatcher(t))
 	if _, _, err := service.Resolve(context.Background(), "file_missing", "tenant-a", "input[0].file_id"); err == nil {
 		t.Fatal("Resolve() succeeded for a missing file")
 	}
@@ -63,8 +64,12 @@ func TestDeleteExpiredRemovesDatabaseRecordAndFiles(t *testing.T) {
 	if err := dataStore.Add(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
+	var output bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
-	service := New(config.Config{DataDir: dataDir}, dataStore)
+	service := New(config.Config{DataDir: dataDir}, dataStore, testDispatcher(t))
 	service.deleteExpired(context.Background())
 
 	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
@@ -72,6 +77,12 @@ func TestDeleteExpiredRemovesDatabaseRecordAndFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(source)); !os.IsNotExist(err) {
 		t.Fatalf("expired file directory stat error = %v; want not exist", err)
+	}
+	logOutput := output.String()
+	for _, expected := range []string{"level=DEBUG", `msg="expired file deleted"`, "file_id=file_expired", "filename=source.txt"} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("log output = %q, missing %q", logOutput, expected)
+		}
 	}
 }
 
@@ -103,7 +114,7 @@ func TestStartResumesPendingConversion(t *testing.T) {
 		DataDir: dataDir, FileTTL: 6 * time.Hour, MaxFileBytes: 1024,
 		MaxDocumentPages: 20, MaxDocumentTextChars: 500_000, ConversionWorkers: 2,
 	}
-	service := New(settings, dataStore)
+	service := New(settings, dataStore, testDispatcher(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := service.Start(ctx); err != nil {
 		t.Fatal(err)
@@ -131,4 +142,13 @@ func TestStartResumesPendingConversion(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("pending conversion was not resumed")
+}
+
+func testDispatcher(t *testing.T) *converter.Dispatcher {
+	t.Helper()
+	registry, err := converter.NewDefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return converter.NewDispatcher(registry)
 }

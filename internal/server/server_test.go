@@ -51,8 +51,8 @@ func TestFileLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = io.WriteString(file, "verification code 4821")
-	_ = form.WriteField("purpose", "user_data")
-	_ = form.WriteField("expires_after", `{"anchor":"created_at","seconds":300}`)
+	_ = form.WriteField("purpose", "assistants")
+	_ = form.WriteField("expires_after", `{"anchor":"created_at","seconds":120}`)
 	if err := form.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,15 @@ func TestFileLifecycle(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
+	if got, want := created["purpose"], "assistants"; got != want {
+		t.Fatalf("purpose = %q, want %q", got, want)
+	}
 	id := created["id"].(string)
+	createdAt := int64(created["created_at"].(float64))
+	expiresAt := int64(created["expires_at"].(float64))
+	if expiresAt-createdAt != 120 {
+		t.Fatalf("file lifetime = %d seconds, want 120", expiresAt-createdAt)
+	}
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -104,6 +112,61 @@ func TestFileLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(fileDirectory); !os.IsNotExist(err) {
 		t.Fatalf("deleted file directory stat error = %v; want not exist", err)
+	}
+}
+
+func TestCreateFileExpiration(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	handler := NewHandler(settings, dataStore, service)
+
+	for _, test := range []struct {
+		name         string
+		expiresAfter map[string]string
+		wantStatus   int
+		wantLifetime int64
+	}{
+		{name: "default", wantStatus: http.StatusOK, wantLifetime: int64(settings.FileTTL / time.Second)},
+		{name: "json_custom", expiresAfter: map[string]string{"expires_after": `{"anchor":"created_at","seconds":45}`}, wantStatus: http.StatusOK, wantLifetime: 45},
+		{name: "sdk_custom", expiresAfter: map[string]string{"expires_after[anchor]": "created_at", "expires_after[seconds]": "45"}, wantStatus: http.StatusOK, wantLifetime: 45},
+		{name: "maximum", expiresAfter: map[string]string{"expires_after[anchor]": "created_at", "expires_after[seconds]": "300"}, wantStatus: http.StatusOK, wantLifetime: 300},
+		{name: "over_maximum", expiresAfter: map[string]string{"expires_after[anchor]": "created_at", "expires_after[seconds]": "301"}, wantStatus: http.StatusBadRequest},
+		{name: "invalid_anchor", expiresAfter: map[string]string{"expires_after[anchor]": "uploaded_at", "expires_after[seconds]": "45"}, wantStatus: http.StatusBadRequest},
+		{name: "non_positive", expiresAfter: map[string]string{"expires_after[anchor]": "created_at", "expires_after[seconds]": "0"}, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := &bytes.Buffer{}
+			form := multipart.NewWriter(body)
+			file, err := form.CreateFormFile("file", "notes.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(file, "expiration test")
+			_ = form.WriteField("purpose", "user_data")
+			for name, value := range test.expiresAfter {
+				_ = form.WriteField(name, value)
+			}
+			if err := form.Close(); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+			request.Header.Set("Content-Type", form.FormDataContentType())
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if test.wantStatus != http.StatusOK {
+				return
+			}
+			var created map[string]any
+			if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+				t.Fatal(err)
+			}
+			lifetime := int64(created["expires_at"].(float64) - created["created_at"].(float64))
+			if lifetime != test.wantLifetime {
+				t.Fatalf("file lifetime = %d seconds, want %d", lifetime, test.wantLifetime)
+			}
+		})
 	}
 }
 
@@ -619,7 +682,11 @@ func testDependencies(t *testing.T) (config.Config, *store.Store, *files.Service
 	if err := os.Mkdir(filepath.Join(dataDir, "work"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	service := files.New(settings, dataStore)
+	registry, err := converter.NewDefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := files.New(settings, dataStore, converter.NewDispatcher(registry))
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := service.Start(ctx); err != nil {
 		t.Fatal(err)

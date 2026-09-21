@@ -55,30 +55,24 @@ func (registry *Registry) Extensions() []string {
 	return extensions
 }
 
-var defaultRegistry = mustRegistry(
-	pdfConverter{},
-	docConverter{},
-	docxConverter{},
-	pptConverter{},
-	pptxConverter{},
-	xlsConverter{},
-	xlsxConverter{},
-	xlsmConverter{},
-	newTextConverter(".txt", "text/plain", extractPlainText),
-	newTextConverter(".md", "text/markdown", extractPlainText),
-	newTextConverter(".markdown", "text/markdown", extractPlainText),
-	newTextConverter(".csv", "text/csv", extractCSVText),
-	newTextConverter(".html", "text/html", extractHTMLText),
-	newTextConverter(".htm", "text/html", extractHTMLText),
-	jpgConverter{},
-	jpegConverter{},
-	pngConverter{},
-)
-
-func mustRegistry(converters ...DocumentConverter) *Registry {
-	registry, err := NewRegistry(converters...)
-	if err != nil {
-		panic(err)
-	}
-	return registry
+func NewDefaultRegistry() (*Registry, error) {
+	return NewRegistry(
+		pdfConverter{},
+		docConverter{},
+		docxConverter{},
+		pptConverter{},
+		pptxConverter{},
+		xlsConverter{},
+		xlsxConverter{},
+		xlsmConverter{},
+		newTextConverter(".txt", "text/plain", extractPlainText),
+		newTextConverter(".md", "text/markdown", extractPlainText),
+		newTextConverter(".markdown", "text/markdown", extractPlainText),
+		newTextConverter(".csv", "text/csv", extractCSVText),
+		newTextConverter(".html", "text/html", extractHTMLText),
+		newTextConverter(".htm", "text/html", extractHTMLText),
+		jpgConverter{},
+		jpegConverter{},
+		pngConverter{},
+	)
 }
