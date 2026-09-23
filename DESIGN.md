@@ -75,6 +75,35 @@ type DocumentConverter interface {
 }
 ```
 
+```mermaid
+flowchart LR
+  S[Source file] --> D[Dispatcher]
+  D --> R[Registry]
+  R -->|registered extension| P[DocumentConverter]
+  R -->|unregistered extension| T[textConverter fallback]
+
+  subgraph Plugins[Compile-time registered plugins]
+    PDF[PDF plugin]
+    Office[Office plugins]
+    Image[Image plugins]
+    Text[textConverter instances]
+  end
+
+  P --> PDF
+  P --> Office
+  P --> Image
+  P --> Text
+  T --> Text
+
+  PDF --> V[Validate]
+  Office --> V
+  Image --> V
+  Text --> V
+  V --> C[Convert]
+  C --> Pipeline[Shared conversion pipeline]
+  Pipeline --> Result[Artifacts and manifest]
+```
+
 | Component | Responsibility |
 | --- | --- |
 | `base.go` | interface、options、result、artifact、limit error |
@@ -90,6 +119,33 @@ type DocumentConverter interface {
 registryだけが標準plugin一覧を知り、dispatcherは形式別条件分岐を持たずconverterの解決だけを行う。`NewDefaultRegistry`をprocess起動時に呼び、生成したdispatcherをFiles serviceへ注入する。package globalのregistryやdispatcherは持たない。検証と変換は解決済みの`DocumentConverter`を呼び出す。PDF、Office、画像のplugin instanceは拡張子ごとの検証と変換を所有する。テキスト形式はすべて同じ`textConverter`型を使い、拡張子、media type、extractorだけをregistryで設定する。CSVはCSV extractor、HTML/HTMはHTML extractor、それ以外はplain text extractorを使う。未登録の拡張子と拡張子なしのファイルもplain text extractorへfallbackし、有効なUTF-8かつNUL byteなしの場合だけ受理する。
 
 Goでは動的module loadingではなく、明示的なcompile-time登録を採用する。`NewRegistry`はtestや将来の構成差し替えにも利用でき、同一拡張子の二重登録をerrorにする。
+
+### Adding a Format
+
+追加する拡張子の特性に応じて、次のいずれかを選ぶ。
+拡張子ごとの分岐をFiles service、推論resolver、dispatcherへ追加しない。
+
+```mermaid
+flowchart TD
+  A[追加する拡張子] --> B{独自の検証・変換が必要か}
+  B -->|不要| C{既存text extractorで処理できるか}
+  C -->|はい| D[NewDefaultRegistryへ<br/>textConverterを登録]
+  C -->|いいえ| E[未登録のまま<br/>plain text fallbackを使用]
+  B -->|必要| F[DocumentConverterを実装]
+  F --> G[Extension / MediaType / Validate / Convert]
+  G --> H[NewDefaultRegistryへ登録]
+  D --> I[Dispatcherが拡張子から解決]
+  E --> I
+  H --> I
+  I --> J[Validate]
+  J --> K[共通pipelineでartifactとmanifestを生成]
+```
+
+- UTF-8テキストをそのまま入力として扱う形式は登録不要である。未登録拡張子はplain text fallbackが処理し、UTF-8でNUL byteを含まない場合だけ受理する。
+- 既存のtext converterと抽出方法を共有できる形式は、`NewDefaultRegistry`へ`newTextConverter`を追加する。plain text、CSV、HTMLのいずれのextractorを使うかと、適切なmedia typeを指定する。
+- 独自の検証、テキスト抽出、画像化が必要な形式は`DocumentConverter`を実装する。`Extension`は一つの拡張子だけを返し、`Validate`で形式固有の入力検証を行い、`Convert`でartifactとmanifestを生成する。同じ実装を複数拡張子で使う場合も、拡張子ごとにconverter instanceを登録する。
+
+専用converterの実装では、既存の共通処理を優先して再利用する。PDF/Officeの描画とpage単位artifactには`convertRenderedDocument`、テキストのみの形式には`convertTextDocument`、元画像を保持する形式には`convertImageDocument`、manifestの生成には`writeResult`を使用する。実装後は`registry.go`の`NewDefaultRegistry`へ登録し、拡張子ごとのregistry test、検証失敗時のtest、変換結果のtestを追加する。画像化またはOffice依存の形式では、対応するintegration testも追加する。
 
 ## File Lifecycle
 

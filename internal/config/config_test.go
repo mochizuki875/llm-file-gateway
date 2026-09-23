@@ -5,6 +5,44 @@ import (
 	"time"
 )
 
+func TestLoadGatewayListenAddress(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name string
+		host string
+		port string
+		want string
+	}{
+		{name: "default", want: "127.0.0.1:8080"},
+		{name: "custom", host: "0.0.0.0", port: "18080", want: "0.0.0.0:18080"},
+		{name: "ipv6", host: "::1", port: "8081", want: "[::1]:8081"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GATEWAY_HOST", test.host)
+			t.Setenv("GATEWAY_PORT", test.port)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.Address != test.want {
+				t.Fatalf("Address = %q, want %q", settings.Address, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"0", "65536", "invalid"} {
+		t.Run("invalid_port_"+value, func(t *testing.T) {
+			t.Setenv("GATEWAY_PORT", value)
+			if _, err := Load(); err == nil || err.Error() != "GATEWAY_PORT must be an integer between 1 and 65535" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadDocumentTextExtraction(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")

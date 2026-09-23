@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -45,6 +46,11 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	gatewayHost := envString("GATEWAY_HOST", "127.0.0.1")
+	gatewayPort, err := envInt("GATEWAY_PORT", 8080)
+	if err != nil || gatewayPort < 1 || gatewayPort > 65535 {
+		return Config{}, fmt.Errorf("GATEWAY_PORT must be an integer between 1 and 65535")
+	}
 
 	fileTTLSeconds, err := envInt64("FILE_TTL_SECONDS", int64(defaultFileTTL/time.Second))
 	if err != nil || fileTTLSeconds < 1 {
@@ -85,7 +91,7 @@ func Load() (Config, error) {
 	}
 
 	config := Config{
-		Address:               envString("GATEWAY_ADDRESS", ":8080"),
+		Address:               net.JoinHostPort(gatewayHost, strconv.Itoa(gatewayPort)),
 		VLLMModel:             model,
 		VLLMBaseURL:           baseURL,
 		GatewayAuthRequired:   authRequired,

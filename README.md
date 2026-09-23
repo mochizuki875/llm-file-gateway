@@ -3,7 +3,7 @@
 ![](images/logo.png)
 
 [vLLMのAPI](https://docs.vllm.ai/en/stable/serving/online_serving/)に対して[OpenAI Files API](https://developers.openai.com/api/reference/resources/files)との互換性を持たせるGatewayです。
-PDF、Office文書、テキスト、画像などのファイルをOpenAI Files API互換のAPIでアップロードすると画像変換およびテキスト抽出が行われ、`file_id`が生成されます。
+PDF、Officeファイル、テキスト、画像などのファイルをOpenAI Files API互換のAPIでアップロードすると画像変換およびテキスト抽出が行われ、`file_id`が生成されます。
 生成された`file_id`をResponses APIまたはChat Completions APIに付加することで、バックエンドにFiles APIでアップロードしたファイルから変換された画像(base64)および抽出テキストを転送することができます。
 
 文書画像変換には[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)を使用します。
@@ -15,9 +15,9 @@ PDF、Office文書、テキスト、画像などのファイルをOpenAI Files A
 
 ## Limitations
 - 複数の`GATEWAY_API_KEY`による認証(マルチテナント)には未対応です。
-- HTMLやMarkdownにおける外部URLや埋め込み画像を取得しません。
+- HTMLやMarkdownにおける外部URLや埋め込み画像は取得しません。
 - Officeファイルのフォントやレイアウト、改ページの完全な再現は保証しません。
-- GatewayはステートフルなAll-in-One構成になっているため、複数インスタンスでのスケーリングには対応していません。
+- GatewayはステートフルなAll-in-One構成になっているため、複数インスタンスによるスケーリングには対応していません。
 - OpenAI Files APIの文書変換、token使用量、回答品質との完全な一致は保証しません。
 - LLM File GatewayはOpenAI Files APIとの互換性を持たせることを目的としているため、一般的なGatewayに期待されるrate limit、request size制限などの機能は含まれていません。
 
@@ -36,7 +36,7 @@ PDF、Office文書、テキスト、画像などのファイルをOpenAI Files A
 | Other vLLM APIs | `/v1/*` (Passed through)
 
 - `GET /health`はプロセスの稼働だけを示し、SQLite、LibreOffice、vLLMへの接続性は検査しません。
-- Files APIの変換は非同期です。推論で参照する前に`GET /v1/files/{file_id}`で処理状態(`status: "processed"`)を確認してください。変換中は`409 file_not_ready`、失敗後は`422 file_processing_failed`を返します。
+- Files APIでファイルをアップロードした際の画像変換およびテキスト抽出は非同期で行われます。推論で参照する前に`GET /v1/files/{file_id}`で処理状態(`status: "processed"`)を確認してください。変換中は`409 file_not_ready`、失敗後は`422 file_processing_failed`を返します。
 - Files APIが所有するパスの未対応メソッドはvLLMへ転送せず、`405`を返します。
 
 ## Supported Formats
@@ -51,14 +51,14 @@ PDF、Office文書、テキスト、画像などのファイルをOpenAI Files A
 | Structured text | `.csv`, `.html`, `.htm` | CSVを行形式に変換、HTMLから可視テキストを抽出し、モデルへの入力として使用 |
 | Image | `.jpeg`, `.jpg`, `.png` | 元形式の画像をそのままモデルへの入力として使用 |
 
-- `DOCUMENT_TEXT_EXTRACTION_ENABLED=false`にすると、PDFとOfficeは画像だけをモデルへ送ります。
-- Office文書のマクロは実行しません。
+- `DOCUMENT_TEXT_EXTRACTION_ENABLED=false`にすると、PDFとOfficeファイルからのテキスト抽出は行わず、変換画像だけをモデルへ送信します。
+- Officeファイルのマクロは実行しません。
 
 ## Requirements
 
 - Go 1.27以降
 - OpenAI互換APIを提供するvLLMサーバー
-- PDF、Office、画像を使う場合はマルチモーダル対応モデル
+- マルチモーダル対応モデル
 - [document-image-renderer](https://github.com/mochizuki875/document-image-renderer)の動作要件
 
 ## Build
@@ -85,8 +85,9 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | Environment variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `VLLM_MODEL` | Yes | - | クライアント要求で許可するモデル名(vLLMのモデル名と一致する必要があります) |
-| `VLLM_BASE_URL` | Yes | - | `/v1`で終わるvLLMの絶対URL |
-| `GATEWAY_ADDRESS` | No | `:8080` | Listen address |
+| `VLLM_BASE_URL` | Yes | - | `/v1`で終わるvLLMのURL |
+| `GATEWAY_HOST` | No | `127.0.0.1` | Gatewayの待受けホスト(全てのネットワークインターフェースで待ち受ける場合は`0.0.0.0`) |
+| `GATEWAY_PORT` | No | `8080` | Gatewayの待受けポート |
 | `GATEWAY_AUTH_REQUIRED` | No | `false` | GatewayでBearer tokenを検証するか |
 | `GATEWAY_API_KEY` | Conditional | - | Gateway用APIキー |
 | `VLLM_API_KEY` | Yes | - | vLLM用APIキー |
@@ -110,8 +111,7 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 
 ## Running the Gateway
 
-`set -a`により、`.env`で定義した値を子プロセスの環境変数としてexportします。
-別のterminalから起動状態を確認します。
+`.env`で定義した値を環境変数として設定し、Gatewayを起動します。
 
 ```bash
 set -a
@@ -140,9 +140,9 @@ curl -sS --fail http://localhost:8080/v1/models \
 
 ## Docker
 
-公開ポートは`GATEWAY_PORT=18080 docker compose up --build -d`のように変更できます。
+公開ポートは`GATEWAY_DOCKER_PORT=18080 docker compose up --build -d`のように変更できます。
 
-Composeはカレントディレクトリの`.env`を展開してコンテナへ渡します。保存データを永続化するvolumeは既定のCompose構成に含まれないため、コンテナを削除するとSQLiteと保存ファイルも失われます。
+Composeはコンテナ内のGatewayを`0.0.0.0:8080`で待ち受けさせ、カレントディレクトリの`.env`を展開してコンテナへ渡します。保存データを永続化するvolumeは既定のCompose構成に含まれないため、コンテナを削除するとSQLiteと保存ファイルも失われます。
 
 ```bash
 docker compose up --build -d
@@ -235,21 +235,6 @@ curl --fail --silent -X DELETE "$OPENAI_BASE_URL/files/$FILE_ID" \
 | Chat Completions | Inline base64 | `{"type":"file","file":{"filename":"document.pdf","file_data":"..."}}` |
 
 一つの参照には`file_id`、`file_data`、`file_url`のいずれか一つだけを指定します。Chat Completionsでは`file_url`を使用できません。
-
-### Adding a Format
-
-専用の検証、解析、画像化が必要な形式を追加する場合は`internal/converter.DocumentConverter`を実装し、`registry.go`の標準registryへ登録します。一つのplugin instanceは`Extension() string`で一つの拡張子だけを所有しますが、同じ実装を複数拡張子へ再利用できます。dispatcher、Files service、推論resolverへ形式別分岐を追加しないことが設計上の制約です。単にUTF-8テキストとして渡す形式は、未知拡張子向けfallbackで処理されるため登録不要です。
-
-共通処理は次の単位で再利用します。
-
-- `convertRenderedDocument`: PDF/Officeの画像化とpage単位artifact
-- `convertTextDocument`: text上限とtext-only artifact
-- `convertImageDocument`: 元画像を保持するimage artifact
-- `writeResult`: schema version 3のmanifest生成
-
-PDF/Office変換では`document-image-renderer`の`renderer.RenderDocument`をLibreOffice timeout 300秒で呼び出し、画像は150 DPIのPNGとして生成します。`DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合は`renderer.ExtractDocumentWithOptions`も呼び出します。Gatewayは変換ごとに専有する`derived` directoryと`manifest.json`を初期化し、途中失敗時は両方を削除します。
-
-Files APIの変換はprocess内queueと`CONVERSION_WORKERS`個のworkerで非同期実行されます。起動時にはSQLite上で中断されたjobをqueueへ戻し、janitorは別goroutineで期限切れfileを削除します。
 
 ## Testing
 

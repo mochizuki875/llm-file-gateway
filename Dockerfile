@@ -43,7 +43,8 @@ COPY --from=build /out/llm-file-gateway /usr/local/bin/llm-file-gateway
 
 USER gateway
 ENV HOME=/home/gateway \
-    GATEWAY_ADDRESS=:8080 \
+    GATEWAY_HOST=0.0.0.0 \
+    GATEWAY_PORT=8080 \
     GATEWAY_DATA_DIR=/var/lib/file-gateway
 WORKDIR /home/gateway
 EXPOSE 8080
