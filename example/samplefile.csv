@@ -1,0 +1,13 @@
+﻿id,name,department,email,country,age,annual_salary_usd,start_date,status
+1,Emily Carter,Engineering,emily.carter@example.com,United States,31,98000,2022-04-18,Active
+2,Liam Wilson,Marketing,liam.wilson@example.com,Canada,28,72000,2023-01-09,Active
+3,Sophia Brown,Finance,sophia.brown@example.com,United Kingdom,35,88000,2020-11-02,Active
+4,Noah Martin,Sales,noah.martin@example.com,France,42,91000,2019-06-24,On Leave
+5,Olivia Garcia,Human Resources,olivia.garcia@example.com,Spain,30,68000,2021-09-13,Active
+6,Ethan Lee,Engineering,ethan.lee@example.com,Singapore,27,85000,2024-02-05,Active
+7,Ava Thompson,Operations,ava.thompson@example.com,Australia,39,79000,2018-08-20,Active
+8,Lucas Müller,Engineering,lucas.muller@example.com,Germany,33,94000,2022-12-01,Active
+9,Mia Rossi,Design,mia.rossi@example.com,Italy,26,71000,2023-07-17,Active
+10,James Anderson,Customer Support,james.anderson@example.com,United States,37,65000,2020-03-30,Inactive
+11,Isabella Silva,Sales,isabella.silva@example.com,Brazil,29,73000,2024-05-06,Active
+12,Henry Tanaka,Product,henry.tanaka@example.com,Japan,34,90000,2021-01-25,Active

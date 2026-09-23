@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/mochizuki875/llm-file-gateway/internal/converter/extractor"
 )
 
 type Registry struct {
@@ -65,12 +67,12 @@ func NewDefaultRegistry() (*Registry, error) {
 		xlsConverter{},
 		xlsxConverter{},
 		xlsmConverter{},
-		newTextConverter(".txt", "text/plain", extractPlainText),
-		newTextConverter(".md", "text/markdown", extractPlainText),
-		newTextConverter(".markdown", "text/markdown", extractPlainText),
-		newTextConverter(".csv", "text/csv", extractCSVText),
-		newTextConverter(".html", "text/html", extractHTMLText),
-		newTextConverter(".htm", "text/html", extractHTMLText),
+		newTextConverter(".txt", "text/plain", extractor.PlainText),
+		newTextConverter(".md", "text/markdown", extractor.PlainText),
+		newTextConverter(".markdown", "text/markdown", extractor.PlainText),
+		newTextConverter(".csv", "text/csv", extractor.CSV),
+		newTextConverter(".html", "text/html", extractor.HTML),
+		newTextConverter(".htm", "text/html", extractor.HTML),
 		jpgConverter{},
 		jpegConverter{},
 		pngConverter{},

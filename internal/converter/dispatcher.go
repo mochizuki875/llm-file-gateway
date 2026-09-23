@@ -1,5 +1,7 @@
 package converter
 
+import "github.com/mochizuki875/llm-file-gateway/internal/converter/extractor"
+
 type Dispatcher struct {
 	registry *Registry
 	fallback DocumentConverter
@@ -11,7 +13,7 @@ func NewDispatcher(registry *Registry) *Dispatcher {
 	}
 	return &Dispatcher{
 		registry: registry,
-		fallback: newTextConverter("", "text/plain", extractPlainText),
+		fallback: newTextConverter("", "text/plain", extractor.PlainText),
 	}
 }
 

@@ -2,7 +2,7 @@
 
 ## 目的
 
-GatewayはOpenAI互換Files APIを所有し、保存またはinline指定された文書をテキストと画像へ変換してvLLMへ転送する。
+GatewayはOpenAI互換Files APIを所有し、保存またはinline指定されたファイルをテキストと画像へ変換してvLLMへ転送する。
 
 ## Architecture
 
@@ -31,10 +31,10 @@ flowchart LR
 1. Files APIがファイルを保存し、`status: "uploaded"`を返します。
 2. バックグラウンドworkerが形式別converterを選択し、text/image artifactを生成します。
 3. 変換完了後、Fileオブジェクトが`status: "processed"`になります。
-4. ResponsesまたはChat Completionsのファイル参照を、抽出テキストとdata URL画像へ展開します。
-5. 展開後のリクエストを同種のvLLM APIへ転送します。
+4. ResponsesまたはChat Completions APIの`file_id`等に紐づくファイルの抽出テキストをプロンプトに、変換画像を`image_url`へ展開します。
+5. 展開後のリクエストをバックエンドのvLLM APIへ転送します。
 
-元文書とGatewayの`file_id`はvLLMへ渡しません。inlineの`file_data`と`file_url`はリクエスト中だけ一時保存し、応答またはエラーの後に削除します。Files APIで保存したファイルは`FILE_TTL_SECONDS`後に削除します。
+GatewayはFiles APIに送信された変換前のファイルと`file_id`を直接vLLMへ送信しません。inlineの`file_data`と`file_url`はリクエスト中だけ一時保存し、応答またはエラーの後に削除します。Files APIで保存したファイルはファイル保持期間(`expires_after.seconds`)経過後に削除されます。(指定されなかった場合は`FILE_TTL_SECONDS`がデフォルト値として使用されます。)
 
 ## Packages
 
@@ -44,10 +44,10 @@ flowchart LR
 | `internal/config` | 環境変数の検証 |
 | `internal/store` | SQLite schemaとtenant-aware CRUD |
 | `internal/files` | ファイルの保存、conversion queue、worker、janitor |
-| `internal/converter` | plugin registry、dispatcher、pipeline、形式別converter |
-| `internal/server` | Files/Responses/Chat API、文書展開、公開URL取得、vLLM proxy |
+| `internal/converter` | converter registry、dispatcher、pipeline、形式別converterとextractor |
+| `internal/server` | Files/Responses/Chat API、ファイル展開、公開URL取得、vLLM proxy |
 | `internal/apierror` | OpenAI形式のerror |
-| `example` | Go利用例とsample文書 |
+| `example` | sampleファイル |
 
 `internal/server`はHTTP境界の責務を次のファイルへ分離する。
 
@@ -61,11 +61,7 @@ flowchart LR
 
 
 ## Converter Architecture
-
-converterは、PDF、Office、画像など専用処理が必要な形式のpluginと、全テキスト形式を扱う共通`textConverter`で構成する。PDFとOffice形式ファイルのテキスト抽出および画像変換は`document-image-renderer`へ委譲する。テキスト形式は個別pluginを持たず、共通text converterで処理する。(CSVとHTMLだけは同じconverterへ抽出関数を設定)。
-未知の拡張子や拡張子がないファイルも、有効なUTF-8でNUL byteを含まなければプレーンテキストとして処理する。
-形式追加時にdispatcherやpipelineへ分岐を追加しない。
-
+全てのConverterは`DocumentConverter`を実装し、Plugin形式で任意の形式に対応したConverterを追加できる。
 ```go
 type DocumentConverter interface {
   Extension() string
@@ -75,6 +71,28 @@ type DocumentConverter interface {
 }
 ```
 
+- RegistryはConverterの一覧を保持し、Dispatcherは形式別条件分岐を持たず適切なConverterの選択を行う。
+- 検証と変換はDispatcherが選択したConverterで行う。
+- 各Converterは拡張子ごとの検証(`Validate`)と変換(`Convert`)を所有する。
+- Converterは、PDF、Office、画像など専用処理が必要な形式のConverterと、NUL byteなしのUTF-8形式を扱う共通`textConverter`で構成する。
+- PDFとOffice形式ファイルのテキスト抽出および画像変換は[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)へ委譲する。
+- テキストファイルなどUTF-8形式でNUL byteを含まないファイルは、ファイル形式に対応するExtractorで抽出処理を行なった後、共通の`textConverter`で処理される。
+
+- `textConverter`は`extractor.Extractor`関数型(`func(string) (string, error)`)を保持し、`Validate`と`Convert`の両方で同じextractorを呼び出す。
+
+```go
+package extractor
+
+// Extractor reads a source file and returns its extracted text.
+type Extractor func(string) (string, error)
+```
+
+- extractorは`extractor`パッケージに実装し、`readUTF8`でUTF-8とNUL byteを検証した上で、形式固有のテキスト抽出を行う。
+  - `extractor.PlainText`は`readUTF8`のみで内容をそのまま返す。
+  - `extractor.CSV`はCSVをパースし、各レコードをタブ区切りに変換して改行で結合する。
+  - `extractor.HTML`はHTMLをパースし、`head`/`script`/`style`/`template`を除外して可視テキストを抽出する。
+- Converterでの処理結果は`convertRenderedDocument`および`convertTextDocument`へ渡され、共通pipelineでartifactとmanifestが生成される。
+
 ```mermaid
 flowchart LR
   S[Source file] --> D[Dispatcher]
@@ -82,23 +100,58 @@ flowchart LR
   R -->|registered extension| P[DocumentConverter]
   R -->|unregistered extension| T[textConverter fallback]
 
-  subgraph Plugins[Compile-time registered plugins]
-    PDF[PDF plugin]
-    Office[Office plugins]
-    Image[Image plugins]
-    Text[textConverter instances]
+  subgraph Plugins[Converters]
+    PDF[pdfConverter]
+    DOC[docConverter]
+    DOCX[docxConverter]
+    PPT[pptConverter]
+    PPTX[pptxConverter]
+    XLS[xlsConverter]
+    XLSX[xlsxConverter]
+    XLSM[xlsmConverter]
+    JPG[jpgConverter]
+    JPEG[jpegConverter]
+    PNG[pngConverter]
+    Text[textConverter]
   end
 
   P --> PDF
-  P --> Office
-  P --> Image
+  P --> DOC
+  P --> DOCX
+  P --> PPT
+  P --> PPTX
+  P --> XLS
+  P --> XLSX
+  P --> XLSM
+  P --> JPG
+  P --> JPEG
+  P --> PNG
   P --> Text
   T --> Text
 
   PDF --> V[Validate]
-  Office --> V
-  Image --> V
-  Text --> V
+  DOC --> V[Validate]
+  DOCX --> V[Validate]
+  PPT --> V[Validate]
+  PPTX --> V[Validate]
+  XLS --> V[Validate]
+  XLSX --> V[Validate]
+  XLSM --> V[Validate]
+  JPG --> V[Validate]
+  JPEG --> V[Validate]
+  PNG --> V[Validate]
+  Text --> V[Validate]
+
+  Text --> Plain
+  Text --> CSV
+  Text --> HTML
+
+  subgraph Extractors[Extractors]
+    Plain[PlainText]
+    CSV[CSV]
+    HTML[HTML]
+  end
+
   V --> C[Convert]
   C --> Pipeline[Shared conversion pipeline]
   Pipeline --> Result[Artifacts and manifest]
@@ -107,45 +160,107 @@ flowchart LR
 | Component | Responsibility |
 | --- | --- |
 | `base.go` | interface、options、result、artifact、limit error |
-| `registry.go` | 専用pluginとtext converter設定の登録、拡張子の正規化、検索 |
+| `registry.go` | 専用converterとtext converter設定の登録、拡張子の正規化、検索 |
 | `dispatcher.go` | pathからconverterを解決し、未知拡張子は共通text converterへ委譲 |
 | `pipeline.go` | rendered/text/imageの共通pipelineとmanifest生成 |
-| `<extension>.go` | PDF、Office、画像など専用処理が必要な形式のplugin |
-| `office_common.go` | Office pluginが共有するsignatureとpipeline helper |
-| `text_common.go` | 全テキスト形式のconverter、plain text fallback、CSV/HTML extractor |
-| `image_common.go` | image pluginが共有するdecodeとconversion helper |
+| `<extension>.go` | PDF、Office、画像など専用処理が必要な形式のconverter |
+| `office_common.go` | Office converterが共有するsignatureとpipeline helper |
+| `text_common.go` | 全テキスト形式のconverter、plain text fallback、共通extractor基盤 |
+| `extractor/` | テキスト形式固有のextractor（plain text、CSV、HTML） |
+| `image_common.go` | image converterが共有するdecodeとconversion helper |
 | `validation.go` | signature検証の共通部品 |
-
-registryだけが標準plugin一覧を知り、dispatcherは形式別条件分岐を持たずconverterの解決だけを行う。`NewDefaultRegistry`をprocess起動時に呼び、生成したdispatcherをFiles serviceへ注入する。package globalのregistryやdispatcherは持たない。検証と変換は解決済みの`DocumentConverter`を呼び出す。PDF、Office、画像のplugin instanceは拡張子ごとの検証と変換を所有する。テキスト形式はすべて同じ`textConverter`型を使い、拡張子、media type、extractorだけをregistryで設定する。CSVはCSV extractor、HTML/HTMはHTML extractor、それ以外はplain text extractorを使う。未登録の拡張子と拡張子なしのファイルもplain text extractorへfallbackし、有効なUTF-8かつNUL byteなしの場合だけ受理する。
-
-Goでは動的module loadingではなく、明示的なcompile-time登録を採用する。`NewRegistry`はtestや将来の構成差し替えにも利用でき、同一拡張子の二重登録をerrorにする。
 
 ### Adding a Format
 
-追加する拡張子の特性に応じて、次のいずれかを選ぶ。
-拡張子ごとの分岐をFiles service、推論resolver、dispatcherへ追加しない。
+新しいファイル形式に対応するには、`DocumentConverter`を実装してRegistryへ登録する。形式がUTF-8テキスト系ならExtractorを追加するだけでよく、PDF/Office/画像のような専用処理が必要な形式はConverterを新規実装する。
 
-```mermaid
-flowchart TD
-  A[追加する拡張子] --> B{独自の検証・変換が必要か}
-  B -->|不要| C{既存text extractorで処理できるか}
-  C -->|はい| D[NewDefaultRegistryへ<br/>textConverterを登録]
-  C -->|いいえ| E[未登録のまま<br/>plain text fallbackを使用]
-  B -->|必要| F[DocumentConverterを実装]
-  F --> G[Extension / MediaType / Validate / Convert]
-  G --> H[NewDefaultRegistryへ登録]
-  D --> I[Dispatcherが拡張子から解決]
-  E --> I
-  H --> I
-  I --> J[Validate]
-  J --> K[共通pipelineでartifactとmanifestを生成]
+#### 1. 形式の分類を決める
+
+| 分類 | 実装方法 | 例 |
+| --- | --- | --- |
+| UTF-8テキスト系 | `extractor`パッケージにExtractorを追加し、`newTextConverter`で登録 | `.md`、`.csv`、`.html` |
+| 画像 | `image_common.go`の`validateImage`/`convertImage`を利用 | `.jpg`、`.png` |
+| レンダリング系 | `convertRenderedDocument`を利用（`document-image-renderer`へ委譲） | `.pdf`、Office形式 |
+| その他（独自処理） | `DocumentConverter`を直接実装 | 将来の専用形式 |
+
+#### 2. テキスト系形式の追加（Extractor）
+
+`internal/converter/extractor/`に`<format>.go`を追加する。Extractorは`func(string) (string, error)`型で、必ず`readUTF8`でUTF-8とNUL byteを検証してから形式固有の抽出を行う。
+
+```go
+package extractor
+
+// JSON extracts the visible content of a JSON file.
+func JSON(source string) (string, error) {
+    text, err := readUTF8(source)
+    if err != nil {
+        return "", err
+    }
+    // 形式固有の抽出処理
+    return extracted, nil
+}
 ```
 
-- UTF-8テキストをそのまま入力として扱う形式は登録不要である。未登録拡張子はplain text fallbackが処理し、UTF-8でNUL byteを含まない場合だけ受理する。
-- 既存のtext converterと抽出方法を共有できる形式は、`NewDefaultRegistry`へ`newTextConverter`を追加する。plain text、CSV、HTMLのいずれのextractorを使うかと、適切なmedia typeを指定する。
-- 独自の検証、テキスト抽出、画像化が必要な形式は`DocumentConverter`を実装する。`Extension`は一つの拡張子だけを返し、`Validate`で形式固有の入力検証を行い、`Convert`でartifactとmanifestを生成する。同じ実装を複数拡張子で使う場合も、拡張子ごとにconverter instanceを登録する。
+`internal/converter/text_common.go`の`newTextConverter`で登録する。拡張子は小文字で`.`から始める。
 
-専用converterの実装では、既存の共通処理を優先して再利用する。PDF/Officeの描画とpage単位artifactには`convertRenderedDocument`、テキストのみの形式には`convertTextDocument`、元画像を保持する形式には`convertImageDocument`、manifestの生成には`writeResult`を使用する。実装後は`registry.go`の`NewDefaultRegistry`へ登録し、拡張子ごとのregistry test、検証失敗時のtest、変換結果のtestを追加する。画像化またはOffice依存の形式では、対応するintegration testも追加する。
+```go
+newTextConverter(".json", "application/json", extractor.JSON),
+```
+
+#### 3. 専用Converterの追加
+
+`internal/converter/`に`<extension>.go`を追加し、`DocumentConverter`の4メソッドを実装する。
+
+```go
+package converter
+
+import "context"
+
+type jsonConverter struct{}
+
+func (jsonConverter) Extension() string { return ".json" }
+
+func (jsonConverter) MediaType() string { return "application/json" }
+
+func (jsonConverter) Validate(source string) error {
+    return validateSignature(source, []byte("{"))
+}
+
+func (documentConverter jsonConverter) Convert(ctx context.Context, source, outputDir string, options Options) (Result, error) {  
+    return convertTextDocument(source, outputDir, documentConverter.MediaType(), []string{text}, options)
+}
+```
+
+- `Validate`は拡張子と内容の一致を検証する。共通部品は`validateSignature`（先頭バイト列）と`validateImage`（画像decode）を使う。
+- `Convert`は共通pipelineへ委譲する。テキストは`convertTextDocument`、画像は`convertImage`、レンダリング系は`convertRenderedDocument`を使う。
+- 変換結果のartifactとmanifest生成は共通pipelineが行うため、Converter側で`manifest.json`を直接書かない。
+
+#### 4. Registryへの登録
+
+`internal/converter/registry.go`の`NewDefaultRegistry`に追加する。拡張子の重複登録はエラーになるため、既存の登録と衝突しないこと。
+
+```go
+func NewDefaultRegistry() (*Registry, error) {
+    return NewRegistry(
+        // ...existing...
+        newTextConverter(".json", "application/json", extractor.JSON),
+    )
+}
+```
+
+#### 5. テスト
+
+- `internal/converter/registry_test.go`の`TestDefaultRegistryContainsSupportedFormats`に拡張子を追加する。
+- `internal/converter/text_common_test.go`の`TestTextConverters`にテキスト系のケースを追加する。
+- 専用Converterは`dispatcher_test.go`の`TestDispatcherDelegatesToSelectedPlugin`と同様に、`convertForTest`で`Validate`→`Convert`を通してartifactを検証する。
+- 外部ツール（LibreOffice等）に依存するテストは`testing.Short()`でskipする。
+
+#### 注意点
+
+- 拡張子はRegistryで小文字に正規化されるが、登録時は小文字で統一する。
+- 未知拡張子はDispatcherが`text/plain`のfallbackへ委譲するため、テキスト系以外の形式を追加する場合は必ずRegistryへ登録する。
+- 文字数上限（`MaxTextChars`）とページ数上限（`MaxPages`）は共通pipelineで適用される。Converter側で独自に制限を追加する場合は`TextLimitError`/`PageLimitError`を返す。
+- 変換中に`outputDir`を直接操作しない。共通pipelineが`derived` directoryと`manifest.json`の初期化・後処理を担う。
 
 ## File Lifecycle
 
@@ -171,7 +286,7 @@ sequenceDiagram
   participant Queue as Conversion Queue
   participant Worker as Conversion Worker
   participant Registry
-  participant Plugin as Format Plugin
+  participant Converter as Format Converter
   participant Pipeline
 
   Client->>API: POST /v1/files
@@ -183,8 +298,8 @@ sequenceDiagram
   Worker->>Store: status=processing
   Worker->>Registry: converter for extension
   Registry-->>Worker: DocumentConverter
-  Worker->>Plugin: Convert
-  Plugin->>Pipeline: rendered/text/image pipeline
+  Worker->>Converter: Convert
+  Converter->>Pipeline: rendered/text/image pipeline
   Pipeline-->>Worker: manifest + artifacts
   Worker->>Store: status=processed
 ```
@@ -193,13 +308,13 @@ queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworke
 
 ## Conversion
 
-入力は選択されたpluginが拡張子に対応する基本signatureを検証する。PDFとOfficeは`document-image-renderer`の`pkg/renderer.RenderDocument`で150 DPI PNGへ描画し、抽出が有効な場合は`ExtractDocumentWithOptions`でテキストも取得する。どちらもLibreOffice timeoutは300秒とする。rendererはPDFをPDFium/WASMで直接処理し、Officeを必要に応じてLibreOfficeで一時変換する。DOC/DOCXはページ、PPT/PPTXはスライド、XLS/XLSX/XLSMはworksheetが画像単位となる。
+入力は選択されたConverterが拡張子に対応する基本signatureを検証する。PDFとOfficeは`document-image-renderer`の`pkg/renderer.RenderDocument`で150 DPI PNGへ描画し、抽出が有効な場合は`ExtractDocumentWithOptions`でテキストも取得する。どちらもLibreOffice timeoutは300秒とする。rendererはPDFをPDFium/WASMで直接処理し、Officeを必要に応じてLibreOfficeで一時変換する。DOC/DOCXはページ、PPT/PPTXはスライド、XLS/XLSX/XLSMはworksheetが画像単位となる。
 
 Gatewayは`document-image-renderer`の既定値をそのまま使わず、`DefaultRenderOptions`を取得して必要なfieldだけを上書きする。`document-image-renderer`はページ単位で画像を保存し、途中失敗時に既生成画像を残す。また出力directory内の無関係なfileを削除しない。このためGatewayは専有する`derived` directoryと同階層の`manifest.json`を変換開始前に初期化し、変換が完了しなければ両方を削除する。`document-image-renderer`が返す`UnsupportedFormatError`、`DependencyNotFoundError`、`DocumentConversionError`、`DocumentRenderError`を含む変換errorはconverterから呼び出し元へ伝播する。
 
-PDFと全Office形式のテキスト抽出は`document-image-renderer`へ委譲し、Gatewayは`ExtractResult.Text()`で結合した文書全体のテキストを一つのartifactとして保存する。`document-image-renderer`は抽出text partと描画画像の対応を保証しないため、テキストへpage、slide、sheet番号を割り当てない。描画画像は元文書のページ、スライド、シート単位のartifactとして順序と番号を保持する。`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とし、`false`の場合は`document-image-renderer`の抽出処理を呼ばず、PDFとOfficeを画像だけのcontent partへ展開する。テキスト系は入力内容そのものであるため設定対象外とし、UTF-8を要求する。HTMLは非表示要素を除外し、未知拡張子のUTF-8テキストはplain textとして内容をそのまま保持する。JPEG/PNGは再圧縮しない。抽出を有効にした場合、文字数上限はtext-only形式だけでなく、PDFとOfficeにも描画前に適用する。
+PDFと全Office形式のテキスト抽出は`document-image-renderer`へ委譲し、Gatewayは`ExtractResult.Text()`で結合したファイル全体のテキストを一つのartifactとして保存する。`document-image-renderer`は抽出text partと描画画像の対応を保証しないため、テキストへpage、slide、sheet番号を割り当てない。描画画像は元ファイルのページ、スライド、シート単位のartifactとして順序と番号を保持する。`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とし、`false`の場合は`document-image-renderer`の抽出処理を呼ばず、PDFとOfficeを画像だけのcontent partへ展開する。テキスト系は入力内容そのものであるため設定対象外とし、UTF-8を要求する。HTMLは非表示要素を除外し、未知拡張子のUTF-8テキストはplain textとして内容をそのまま保持する。JPEG/PNGは再圧縮しない。抽出を有効にした場合、文字数上限はtext-only形式だけでなく、PDFとOfficeにも描画前に適用する。
 
-成果物は`manifest.json`、文書単位の抽出text、part単位のimageで構成する。schema version 3ではdocumentの`text_path`と各image partを独立させる。Files API成果物は`GATEWAY_DATA_DIR/files/<tenant>/<file_id>`、inline入力は`work`以下へ置き、request終了時に削除する。
+成果物は`manifest.json`、ファイル単位の抽出text、part単位のimageで構成する。schema version 3ではdocumentの`text_path`と各image partを独立させる。Files API成果物は`GATEWAY_DATA_DIR/files/<tenant>/<file_id>`、inline入力は`work`以下へ置き、request終了時に削除する。
 
 Responses APIとChat Completions APIの`stream: true`は、入力展開後にvLLMへそのまま転送する。vLLMのSSE response headerとbodyを変換せず、eventを受信するたびにclientへflushする。client切断時はrequest contextを通じて上流通信をcancelする。`REQUEST_TIMEOUT_SECONDS`はstream全体の上限にも適用する。
 
@@ -225,7 +340,7 @@ Files、Responses、Chat以外の`/v1/*`はmethod、query、body、end-to-end he
 
 ## Logging
 
-`log/slog`の構造化text logを標準エラーへ出力する。公開設定`LOGLEVEL`はseverityではなく昇順のverbosityとし、`0`はINFO以上、`1`はDEBUG以上、`2`はqueue操作など高頻度の内部状態も含める。内部ではverbosityごとにslog levelを4ずつ下げてfilterするが、出力時はV1/V2ともlevel名を`DEBUG`へ正規化する。WARNは4xxの入力検証・回復可能な欠落・cleanup・外部URL取得失敗、ERRORはDB、artifact、変換、vLLM通信など処理を完了できない内部・依存障害に使う。4xxログにはHTTP status、error code、paramを含める。文書本文、API key、完全な外部URLはfieldへ含めない。
+`log/slog`の構造化text logを標準エラーへ出力する。公開設定`LOGLEVEL`はseverityではなく昇順のverbosityとし、`0`はINFO以上、`1`はDEBUG以上、`2`はqueue操作など高頻度の内部状態も含める。内部ではverbosityごとにslog levelを4ずつ下げてfilterするが、出力時はV1/V2ともlevel名を`DEBUG`へ正規化する。WARNは4xxの入力検証・回復可能な欠落・cleanup・外部URL取得失敗、ERRORはDB、artifact、変換、vLLM通信など処理を完了できない内部・依存障害に使う。4xxログにはHTTP status、error code、paramを含める。ファイル本文、API key、完全な外部URLはfieldへ含めない。
 
 ## Operational Boundary
 

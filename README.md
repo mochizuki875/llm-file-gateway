@@ -6,7 +6,7 @@
 PDF、Officeファイル、テキスト、画像などのファイルをOpenAI Files API互換のAPIでアップロードすると画像変換およびテキスト抽出が行われ、`file_id`が生成されます。
 生成された`file_id`をResponses APIまたはChat Completions APIに付加することで、バックエンドにFiles APIでアップロードしたファイルから変換された画像(base64)および抽出テキストを転送することができます。
 
-文書画像変換には[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)を使用します。
+ファイル画像変換には[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)を使用します。
 
 ## Features
 - OpenAI互換のFiles API
@@ -18,7 +18,7 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 - HTMLやMarkdownにおける外部URLや埋め込み画像は取得しません。
 - Officeファイルのフォントやレイアウト、改ページの完全な再現は保証しません。
 - GatewayはステートフルなAll-in-One構成になっているため、複数インスタンスによるスケーリングには対応していません。
-- OpenAI Files APIの文書変換、token使用量、回答品質との完全な一致は保証しません。
+- OpenAI Files APIのファイル変換、token使用量、回答品質との完全な一致は保証しません。
 - LLM File GatewayはOpenAI Files APIとの互換性を持たせることを目的としているため、一般的なGatewayに期待されるrate limit、request size制限などの機能は含まれていません。
 
 ## Supported APIs
@@ -43,10 +43,10 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 
 | 種別 | 拡張子 | モデルへの入力 |
 | --- | --- | --- |
-| PDF | `.pdf` | 文書全体の抽出テキストとページ画像を生成し、モデルへの入力として使用 |
-| Word | `.doc`, `.docx` | 文書全体の抽出テキストとページ画像を生成し、モデルへの入力として使用 |
-| PowerPoint | `.ppt`, `.pptx` | 文書全体の抽出テキストとスライド画像を生成し、モデルへの入力として使用 |
-| Excel | `.xls`, `.xlsx`, `.xlsm` | 文書全体の抽出テキストとシート画像を生成し、モデルへの入力として使用 |
+| PDF | `.pdf` | ファイル全体の抽出テキストとページ画像を生成し、モデルへの入力として使用 |
+| Word | `.doc`, `.docx` | ファイル全体の抽出テキストとページ画像を生成し、モデルへの入力として使用 |
+| PowerPoint | `.ppt`, `.pptx` | ファイル全体の抽出テキストとスライド画像を生成し、モデルへの入力として使用 |
+| Excel | `.xls`, `.xlsx`, `.xlsm` | ファイル全体の抽出テキストとシート画像を生成し、モデルへの入力として使用 |
 | Text | `.txt`, `.md`, `.markdown`, `.json`, `.jsonl`, `.yaml`, `.yml`, `.go`など | UTF-8の内容をテキストとして生成し、モデルへの入力として使用 |
 | Structured text | `.csv`, `.html`, `.htm` | CSVを行形式に変換、HTMLから可視テキストを抽出し、モデルへの入力として使用 |
 | Image | `.jpeg`, `.jpg`, `.png` | 元形式の画像をそのままモデルへの入力として使用 |
@@ -95,17 +95,17 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | `FILE_TTL_SECONDS` | No | `300` | デフォルトのファイル保持期間(sec)および`expires_after.seconds`で指定可能な上限値 |
 | `MAX_FILE_BYTES` | No | `52428800`(50 MiB) | 1ファイルの最大サイズ(bytes) |
 | `MAX_DOCUMENT_PAGES` | No | `20` | 画像変換する最大ページ数 |
-| `MAX_DOCUMENT_IMAGES` | No | `8` | 1文書からvLLMへ送る最大画像数 |
-| `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | 1文書から抽出するテキストの最大文字数（PDF、Officeを含む） |
+| `MAX_DOCUMENT_IMAGES` | No | `8` | 1ファイルからvLLMへ送る最大画像数 |
+| `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | 1ファイルから抽出するテキストの最大文字数（PDF、Officeを含む） |
 | `DOCUMENT_TEXT_EXTRACTION_ENABLED` | No | `true` | PDFとOfficeからテキストを抽出するか |
-| `CONVERSION_WORKERS` | No | `2` | 並行して文書を変換するworker数。正の整数で変更可能 |
+| `CONVERSION_WORKERS` | No | `2` | 並行してファイルを変換するworker数。正の整数で変更可能 |
 | `REQUEST_TIMEOUT_SECONDS` | No | `300` | vLLM通信のtimeout。streamingではstream全体に適用 |
 | `LOGLEVEL` | No | `0` | ログverbosity（`0`: 通常、`1`: DEBUG、`2`: 高頻度の詳細ログ） |
 
 - `GATEWAY_AUTH_REQUIRED=true`を設定した場合はGatewayでの認証が有効となり、`GATEWAY_API_KEY`の設定が必須となります。
 - GatewayからvLLMへの認証は`VLLM_API_KEY`を用いて行われるため、Gatewayに送信された`OPENAI_API_KEY`は転送されません。(`VLLM_API_KEY`は常に必須です。)
 - `GET /health`は認証対象外です。
-- PDF/Officeの最大ページ数は`MAX_DOCUMENT_PAGES`、vLLMへ送る画像数は文書ごとに`MAX_DOCUMENT_IMAGES`で制限します。`DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合、画像上限を超えた分の内容も抽出テキストとして送信します。
+- PDF/Officeの最大ページ数は`MAX_DOCUMENT_PAGES`、vLLMへ送る画像数はファイルごとに`MAX_DOCUMENT_IMAGES`で制限します。`DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合、画像上限を超えた分の内容も抽出テキストとして送信します。
 - 抽出テキストはPDF、Office、すべてのテキスト形式を含めて`MAX_DOCUMENT_TEXT_CHARS`で制限します。
 - ファイル保持期間(`expires_after.seconds`)の上限は`FILE_TTL_SECONDS`で、未指定の場合は`FILE_TTL_SECONDS`に設定された値が適用されます。
 
@@ -254,14 +254,14 @@ make test-integration
 - `file_url`はHTTPSの443番ポートと公開IPだけを許可し、redirectごとに再検証します。
 - 保存ファイルは`FILE_TTL_SECONDS`で設定した保持期間経過後に削除します。
 - Gateway認証無効時の保存領域は全クライアントで共有されます。
-- 文書由来テキストを信頼しないようGatewayでsystem instructionを追加します。
-- ログへ文書本文やAPI keyを明示的には出力しません。
+- ファイル由来のテキストを信頼しないようGatewayでsystem instructionを追加します。
+- ログへファイルに記載された本文やAPI keyを明示的には出力しません。
 - TLS終端をサポートしません。
 - parserの完全なsandbox、保持ファイルの暗号化はサポートしません。
 
 ## Contributing
 
-変更は小さく保ち、関連するtestと文書を更新してください。変換結果に影響する変更では、PDFと各Office形式のintegration testを実行し、LibreOffice、フォント、`document-image-renderer`のversion差も考慮してください。
+変更は小さく保ち、関連するtestとファイルを更新してください。変換結果に影響する変更では、PDFと各Office形式のintegration testを実行し、LibreOffice、フォント、`document-image-renderer`のversion差も考慮してください。
 
 詳細は[DESIGN.md](DESIGN.md)を参照してください。
 
