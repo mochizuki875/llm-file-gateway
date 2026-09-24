@@ -20,6 +20,7 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/store"
 )
 
+// main is the entry point of the gateway process.
 func main() {
 	if err := run(); err != nil {
 		slog.Error("gateway stopped", "error", err)
@@ -27,6 +28,8 @@ func main() {
 	}
 }
 
+// run loads the configuration, starts the file service and the HTTP server,
+// and blocks until the server is shut down or a fatal error occurs.
 func run() error {
 	settings, err := config.Load()
 	if err != nil {
@@ -56,17 +59,16 @@ func run() error {
 	defer stop()
 
 	// Set up the default converter registry.
-	registry, err := converter.NewDefaultRegistry()
-	if err != nil {
-		return err
-	}
+	registry := converter.NewInTreeRegistry()
 
 	// Set up the file service with the converter dispatcher.
-	fileService := files.New(settings, dataStore, converter.NewDispatcher(registry))
+	converterConfig := converter.DefaultConverterConfig()
+	converterConfig.DPI = settings.DocumentDPI
+	fileService := files.New(settings, dataStore, converter.NewDispatcher(registry, converterConfig, converter.SettingsHandle{SettingsValue: settings}))
 
 	// Start the file service.
 	// Worker goroutines will start and begin processing pending files.
-	if err := fileService.Start(ctx); err != nil {
+	if err := fileService.Run(ctx, settings.Workers); err != nil {
 		return err
 	}
 	defer fileService.Stop()
@@ -97,6 +99,8 @@ func run() error {
 	}
 }
 
+// newLogger builds a text logger whose level is derived from the configured
+// verbosity (0: info, 1: debug, 2: verbose debug).
 func newLogger(output io.Writer, verbosity int) *slog.Logger {
 	return slog.New(slog.NewTextHandler(output, &slog.HandlerOptions{
 		Level:       logging.Level(verbosity),

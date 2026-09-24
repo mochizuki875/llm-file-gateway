@@ -77,7 +77,7 @@ func TestLoadDocumentTextExtraction(t *testing.T) {
 	})
 }
 
-func TestLoadConversionWorkers(t *testing.T) {
+func TestLoadWorkers(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
 	t.Setenv("VLLM_API_KEY", "upstream-key")
@@ -88,8 +88,8 @@ func TestLoadConversionWorkers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if settings.ConversionWorkers != 2 {
-			t.Fatalf("ConversionWorkers = %d, want 2", settings.ConversionWorkers)
+		if settings.Workers != 2 {
+			t.Fatalf("Workers = %d, want 2", settings.Workers)
 		}
 	})
 
@@ -99,8 +99,8 @@ func TestLoadConversionWorkers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if settings.ConversionWorkers != 4 {
-			t.Fatalf("ConversionWorkers = %d, want 4", settings.ConversionWorkers)
+		if settings.Workers != 4 {
+			t.Fatalf("Workers = %d, want 4", settings.Workers)
 		}
 	})
 
@@ -182,6 +182,43 @@ func TestLoadFileTTL(t *testing.T) {
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Setenv("FILE_TTL_SECONDS", value)
 			if _, err := Load(); err == nil || err.Error() != "FILE_TTL_SECONDS must be a positive integer" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadDocumentDPI(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("DOCUMENT_DPI", "")
+		settings, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settings.DocumentDPI != 300 {
+			t.Fatalf("DocumentDPI = %d, want 300", settings.DocumentDPI)
+		}
+	})
+
+	t.Run("custom", func(t *testing.T) {
+		t.Setenv("DOCUMENT_DPI", "600")
+		settings, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settings.DocumentDPI != 600 {
+			t.Fatalf("DocumentDPI = %d, want 600", settings.DocumentDPI)
+		}
+	})
+
+	for _, value := range []string{"0", "1201", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("DOCUMENT_DPI", value)
+			if _, err := Load(); err == nil || err.Error() != "DOCUMENT_DPI must be an integer between 1 and 1200" {
 				t.Fatalf("Load() error = %v", err)
 			}
 		})

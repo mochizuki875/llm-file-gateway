@@ -12,6 +12,9 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/apierror"
 )
 
+// downloadPublicHTTPS downloads a file from a public HTTPS URL, following up
+// to four redirects and re-validating each one. It returns the content and a
+// filename derived from the final URL path.
 func (server *Server) downloadPublicHTTPS(ctx context.Context, rawURL, param string) ([]byte, string, error) {
 	parsed, err := server.validatePublicHTTPS(ctx, rawURL, param)
 	if err != nil {
@@ -56,6 +59,9 @@ func (server *Server) downloadPublicHTTPS(ctx context.Context, rawURL, param str
 	return nil, "", apierror.New(400, "invalid_file_url", "Too many redirects.", param)
 }
 
+// validatePublicHTTPS enforces that a URL is HTTPS on port 443 without user
+// info and that its hostname resolves only to public IP addresses, preventing
+// SSRF to internal networks.
 func (server *Server) validatePublicHTTPS(ctx context.Context, rawURL, param string) (*url.URL, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || (parsed.Port() != "" && parsed.Port() != "443") {

@@ -6,6 +6,8 @@ import (
 	_ "image/png"
 )
 
+// validateImage checks that the file at source is a valid image of the given
+// format.
 func validateImage(source, format string) error {
 	_, detected, err := imageSize(source)
 	if err != nil {
@@ -17,6 +19,7 @@ func validateImage(source, format string) error {
 	return nil
 }
 
+// convertImage converts an image file into a single-part document.
 func convertImage(source, outputDir, mediaType string) (Result, error) {
 	config, _, err := imageSize(source)
 	if err != nil {

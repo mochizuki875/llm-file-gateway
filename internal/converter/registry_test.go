@@ -28,35 +28,69 @@ func (documentConverter *testConverter) Convert(_ context.Context, _, _ string, 
 
 func TestRegistryAcceptsConverterPlugins(t *testing.T) {
 	plugin := &testConverter{extension: ".custom", mediaType: "application/x-custom"}
-	registry, err := NewRegistry(plugin)
-	if err != nil {
+	registry := Registry{}
+	if err := registry.Register(".custom", ConverterAdapter(func(ConverterConfig) DocumentConverter { return plugin })); err != nil {
 		t.Fatal(err)
 	}
-	registered, err := registry.Converter(".CUSTOM")
+	registered, err := registry.Converter(context.Background(), ".CUSTOM", DefaultConverterConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if registered.MediaType() != plugin.mediaType {
 		t.Fatalf("media type = %q, want %q", registered.MediaType(), plugin.mediaType)
 	}
-	if _, err := NewRegistry(plugin, plugin); err == nil {
+	if err := registry.Register(".custom", ConverterAdapter(func(ConverterConfig) DocumentConverter { return plugin })); err == nil {
 		t.Fatal("duplicate extension registration succeeded")
 	}
 }
 
-func TestDefaultRegistryContainsSupportedFormats(t *testing.T) {
-	want := []string{".csv", ".doc", ".docx", ".htm", ".html", ".jpeg", ".jpg", ".markdown", ".md", ".pdf", ".png", ".ppt", ".pptx", ".txt", ".xls", ".xlsm", ".xlsx"}
-	registry, err := NewDefaultRegistry()
-	if err != nil {
+func TestRegistryRejectsInvalidRegistrations(t *testing.T) {
+	registry := Registry{}
+	if err := registry.Register("custom", ConverterAdapter(func(ConverterConfig) DocumentConverter { return &testConverter{} })); err == nil {
+		t.Fatal("extension without leading dot accepted")
+	}
+	if err := registry.Register(".custom", nil); err == nil {
+		t.Fatal("nil factory accepted")
+	}
+	if err := registry.Unregister(".missing"); err == nil {
+		t.Fatal("unregister of missing extension succeeded")
+	}
+}
+
+func TestRegistryMerge(t *testing.T) {
+	left := Registry{}
+	right := Registry{}
+	if err := left.Register(".custom", ConverterAdapter(func(ConverterConfig) DocumentConverter { return &testConverter{} })); err != nil {
 		t.Fatal(err)
 	}
+	if err := right.Register(".other", ConverterAdapter(func(ConverterConfig) DocumentConverter { return &testConverter{} })); err != nil {
+		t.Fatal(err)
+	}
+	if err := left.Merge(right); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := left.Converter(context.Background(), ".other", DefaultConverterConfig(), nil); err != nil {
+		t.Fatalf("merged converter unavailable: %v", err)
+	}
+	if err := left.Merge(right); err == nil {
+		t.Fatal("merge with conflicting extension succeeded")
+	}
+}
+
+func TestInTreeRegistryContainsSupportedFormats(t *testing.T) {
+	want := []string{".csv", ".doc", ".docx", ".htm", ".html", ".jpeg", ".jpg", ".markdown", ".md", ".pdf", ".png", ".ppt", ".pptx", ".txt", ".xls", ".xlsm", ".xlsx"}
+	registry := NewInTreeRegistry()
 	got := registry.Extensions()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("extensions = %v, want %v", got, want)
 	}
-	for extension, plugin := range registry.byExtension {
-		if plugin.Extension() != extension {
-			t.Fatalf("plugin extension = %q, registry key = %q", plugin.Extension(), extension)
+	for extension, factory := range registry {
+		documentConverter, err := factory(context.Background(), DefaultConverterConfig(), nil)
+		if err != nil {
+			t.Fatalf("factory for %s failed: %v", extension, err)
+		}
+		if documentConverter.Extension() != extension {
+			t.Fatalf("plugin extension = %q, registry key = %q", documentConverter.Extension(), extension)
 		}
 	}
 }

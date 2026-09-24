@@ -6,15 +6,15 @@ from pathlib import Path
 
 from openai import NotFoundError, OpenAI
 
-DOCUMENT_PATH = Path(__file__).with_name("samplefile.xlsx")
+DOCUMENT_PATH = Path(__file__).with_name("samplefile.pptx")
 POLL_INTERVAL_SECONDS = 0.5
 PROCESSING_TIMEOUT_SECONDS = 600.0
-# SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
-SUMMARY_PROMPT = "この家計の重大な問題点を指摘してください"
+SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "253952"))
 
 
 def required_environment(name: str) -> str:
+    """Return the value of the named environment variable or raise an error."""
     value = os.getenv(name)
     if not value:
         raise RuntimeError(f"{name} is required")
@@ -22,6 +22,7 @@ def required_environment(name: str) -> str:
 
 
 def wait_until_processed(client: OpenAI, file_id: str) -> None:
+    """Poll the file status until it is processed, fails, or times out."""
     deadline = time.monotonic() + PROCESSING_TIMEOUT_SECONDS
 
     while time.monotonic() < deadline:
@@ -39,6 +40,7 @@ def wait_until_processed(client: OpenAI, file_id: str) -> None:
 
 
 def delete_file(client: OpenAI, file_id: str, expires_at: int | None) -> None:
+    """Delete an uploaded file, ignoring already-expired or missing files."""
     if expires_at is not None and time.time() >= expires_at:
         print(f"Already expired: {file_id}")
         return
@@ -51,6 +53,7 @@ def delete_file(client: OpenAI, file_id: str, expires_at: int | None) -> None:
 
 
 def main() -> None:
+    """Upload a sample spreadsheet and stream a summary of it."""
     if not DOCUMENT_PATH.is_file():
         raise RuntimeError(f"Document not found: {DOCUMENT_PATH}")
 

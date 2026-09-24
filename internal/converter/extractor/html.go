@@ -15,6 +15,9 @@ func HTML(source string) (string, error) {
 	return visibleHTMLText(text)
 }
 
+// visibleHTMLText walks the parsed HTML tree and returns the visible text,
+// skipping hidden elements (head, script, style, template) and normalizing
+// whitespace.
 func visibleHTMLText(source string) (string, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {

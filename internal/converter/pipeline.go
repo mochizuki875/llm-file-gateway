@@ -11,16 +11,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/mochizuki875/document-image-renderer/pkg/renderer"
 )
 
-func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType string, options Options) (Result, error) {
+// convertRenderedDocument converts PDF and Office documents by extracting text
+// (unless disabled) and rendering each page to a PNG image via the
+// document-image-renderer library.
+func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType string, config ConverterConfig, options Options) (Result, error) {
 	documentText := ""
 	if !options.DisableTextExtraction {
 		extractOptions := renderer.DefaultExtractOptions()
-		extractOptions.LibreOfficeTimeout = 300 * time.Second
+		extractOptions.LibreOfficeTimeout = config.LibreOfficeTimeout
 		extracted, err := renderer.ExtractDocumentWithOptions(ctx, source, &extractOptions)
 		if err != nil {
 			return Result{}, err
@@ -32,9 +34,9 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 	}
 	return withOutputDirectory(outputDir, func() (Result, error) {
 		renderOptions := renderer.DefaultRenderOptions()
-		renderOptions.DPI = 150
-		renderOptions.ImageFormat = renderer.ImageFormatPNG
-		renderOptions.LibreOfficeTimeout = 300 * time.Second
+		renderOptions.DPI = config.DPI
+		renderOptions.ImageFormat = config.ImageFormat
+		renderOptions.LibreOfficeTimeout = config.LibreOfficeTimeout
 		rendered, err := renderer.RenderDocument(ctx, source, outputDir, &renderOptions)
 		if err != nil {
 			return Result{}, err
@@ -68,6 +70,8 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 	})
 }
 
+// convertTextDocument writes each text block to a part file and produces a
+// manifest with no images.
 func convertTextDocument(source, outputDir, mediaType string, textBlocks []string, options Options) (Result, error) {
 	if err := validateTextLimit(textBlocks, options.MaxTextChars); err != nil {
 		return Result{}, err
@@ -85,6 +89,8 @@ func convertTextDocument(source, outputDir, mediaType string, textBlocks []strin
 	})
 }
 
+// validateTextLimit returns a TextLimitError when the combined rune count of
+// all text blocks exceeds limit.
 func validateTextLimit(textBlocks []string, limit int) error {
 	textCharacters := 0
 	for _, text := range textBlocks {
@@ -96,6 +102,8 @@ func validateTextLimit(textBlocks []string, limit int) error {
 	return nil
 }
 
+// convertImageDocument copies an image into the output directory and records
+// its dimensions in the manifest.
 func convertImageDocument(source, outputDir, mediaType string, width, height int) (Result, error) {
 	return withOutputDirectory(outputDir, func() (Result, error) {
 		imageName := "image-0001" + strings.ToLower(filepath.Ext(source))
@@ -117,6 +125,8 @@ func convertImageDocument(source, outputDir, mediaType string, width, height int
 	})
 }
 
+// withOutputDirectory prepares a clean output directory, runs convert, and
+// removes the output again when conversion fails.
 func withOutputDirectory(outputDir string, convert func() (Result, error)) (result Result, err error) {
 	if err := removeConversionOutput(outputDir); err != nil {
 		return Result{}, err
@@ -138,6 +148,8 @@ func withOutputDirectory(outputDir string, convert func() (Result, error)) (resu
 	return result, nil
 }
 
+// removeConversionOutput deletes the output directory and any stale manifest
+// from a previous conversion.
 func removeConversionOutput(outputDir string) error {
 	if err := os.RemoveAll(outputDir); err != nil {
 		return err
@@ -149,6 +161,8 @@ func removeConversionOutput(outputDir string) error {
 	return nil
 }
 
+// writeResult writes manifest.json next to the output directory and returns
+// the conversion result.
 func writeResult(source, outputDir, mediaType, textPath string, artifacts []Artifact) (Result, error) {
 	digest, err := hashFile(source)
 	if err != nil {
@@ -172,6 +186,8 @@ func writeResult(source, outputDir, mediaType, textPath string, artifacts []Arti
 	return Result{Manifest: manifest, Artifacts: artifacts, Warnings: warnings}, nil
 }
 
+// imageSize decodes the image header of source and returns its config and
+// detected format.
 func imageSize(source string) (image.Config, string, error) {
 	input, err := os.Open(source)
 	if err != nil {
@@ -181,6 +197,7 @@ func imageSize(source string) (image.Config, string, error) {
 	return image.DecodeConfig(input)
 }
 
+// hashFile returns the hex-encoded SHA-256 digest of the file at path.
 func hashFile(path string) (string, error) {
 	input, err := os.Open(path)
 	if err != nil {
@@ -194,6 +211,7 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
+// copyFile copies the contents of source to destination.
 func copyFile(source, destination string) error {
 	input, err := os.Open(source)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func TestStoreScopesFilesByTenantAndLifetime(t *testing.T) {
 	if file, err := store.Get(context.Background(), expired.ID, "tenant-a"); err != nil || file != nil {
 		t.Fatalf("expired get = %#v, %v; want nil, nil", file, err)
 	}
-	files, err := store.List(context.Background(), "tenant-a", 20, "desc", "")
+	files, err := store.List(context.Background(), "tenant-a", "", 20, "desc", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +109,7 @@ func TestConsolidateTenants(t *testing.T) {
 	if err := dataStore.ConsolidateTenants(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	files, err := dataStore.List(context.Background(), SharedTenantID, 20, "desc", "")
+	files, err := dataStore.List(context.Background(), SharedTenantID, "", 20, "desc", "")
 	if err != nil || len(files) != 2 {
 		t.Fatalf("shared files = %#v, %v; want 2 files", files, err)
 	}
@@ -130,6 +131,59 @@ func TestExpiredIncludesLegacyDeletedFiles(t *testing.T) {
 	files, err := dataStore.Expired(context.Background())
 	if err != nil || len(files) != 1 || files[0].ID != file.ID {
 		t.Fatalf("cleanup candidates = %#v, %v; want %s", files, err, file.ID)
+	}
+}
+
+func TestOpenDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := OpenDataDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	if _, err := os.Stat(filepath.Join(dataDir, "gateway.db")); err != nil {
+		t.Fatalf("gateway.db = %v", err)
+	}
+	// The database must be usable after opening through the data directory.
+	now := time.Now().Unix()
+	file := testFile("file_datadir", "tenant-a", now, now+3600)
+	if err := dataStore.Add(context.Background(), file); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dataStore.Get(context.Background(), file.ID, file.TenantID)
+	if err != nil || got == nil || got.ID != file.ID {
+		t.Fatalf("get = %#v, %v", got, err)
+	}
+}
+
+func TestGetInternal(t *testing.T) {
+	dataStore, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	now := time.Now().Unix()
+	file := testFile("file_internal", "tenant-a", now, now+3600)
+	if err := dataStore.Add(context.Background(), file); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dataStore.GetInternal(context.Background(), file.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get internal = %#v, %v", got, err)
+	}
+	if got.ID != file.ID || got.TenantID != file.TenantID || got.Status != file.Status {
+		t.Fatalf("internal file = %#v", got)
+	}
+	// Missing IDs return nil without an error.
+	missing, err := dataStore.GetInternal(context.Background(), "file_missing")
+	if err != nil || missing != nil {
+		t.Fatalf("missing internal = %#v, %v; want nil, nil", missing, err)
+	}
+}
+
+func TestOpenRejectsInvalidPath(t *testing.T) {
+	if _, err := Open(filepath.Join(t.TempDir(), "missing", "gateway.db")); err == nil {
+		t.Fatal("Open() succeeded for a missing directory")
 	}
 }
 

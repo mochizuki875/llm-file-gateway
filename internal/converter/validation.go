@@ -6,6 +6,8 @@ import (
 	"os"
 )
 
+// validateSignature checks that the file at source begins with one of the
+// given magic byte signatures.
 func validateSignature(source string, signatures ...[]byte) error {
 	input, err := os.Open(source)
 	if err != nil {

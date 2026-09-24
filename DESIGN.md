@@ -237,14 +237,16 @@ func (documentConverter jsonConverter) Convert(ctx context.Context, source, outp
 
 #### 4. Registryへの登録
 
-`internal/converter/registry.go`の`NewDefaultRegistry`に追加する。拡張子の重複登録はエラーになるため、既存の登録と衝突しないこと。
+`internal/converter/registry.go`の`NewInTreeRegistry`に追加する。拡張子の重複登録はエラーになるため、既存の登録と衝突しないこと。
 
 ```go
-func NewDefaultRegistry() (*Registry, error) {
-    return NewRegistry(
+func NewInTreeRegistry() Registry {
+    return Registry{
         // ...existing...
-        newTextConverter(".json", "application/json", extractor.JSON),
-    )
+        ".json": ConverterAdapter(func(config ConverterConfig) DocumentConverter {
+            return newTextConverter(".json", "application/json", extractor.JSON)
+        }),
+    }
 }
 ```
 
@@ -308,7 +310,7 @@ queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworke
 
 ## Conversion
 
-入力は選択されたConverterが拡張子に対応する基本signatureを検証する。PDFとOfficeは`document-image-renderer`の`pkg/renderer.RenderDocument`で150 DPI PNGへ描画し、抽出が有効な場合は`ExtractDocumentWithOptions`でテキストも取得する。どちらもLibreOffice timeoutは300秒とする。rendererはPDFをPDFium/WASMで直接処理し、Officeを必要に応じてLibreOfficeで一時変換する。DOC/DOCXはページ、PPT/PPTXはスライド、XLS/XLSX/XLSMはworksheetが画像単位となる。
+入力は選択されたConverterが拡張子に対応する基本signatureを検証する。PDFとOfficeは`document-image-renderer`の`pkg/renderer.RenderDocument`で300 DPI PNGへ描画し、抽出が有効な場合は`ExtractDocumentWithOptions`でテキストも取得する。どちらもLibreOffice timeoutは300秒とする。描画DPIは`DOCUMENT_DPI`（既定300、1〜1200）で変更できる。rendererはPDFをPDFium/WASMで直接処理し、Officeを必要に応じてLibreOfficeで一時変換する。DOC/DOCXはページ、PPT/PPTXはスライド、XLS/XLSX/XLSMはworksheetが画像単位となる。
 
 Gatewayは`document-image-renderer`の既定値をそのまま使わず、`DefaultRenderOptions`を取得して必要なfieldだけを上書きする。`document-image-renderer`はページ単位で画像を保存し、途中失敗時に既生成画像を残す。また出力directory内の無関係なfileを削除しない。このためGatewayは専有する`derived` directoryと同階層の`manifest.json`を変換開始前に初期化し、変換が完了しなければ両方を削除する。`document-image-renderer`が返す`UnsupportedFormatError`、`DependencyNotFoundError`、`DocumentConversionError`、`DocumentRenderError`を含む変換errorはconverterから呼び出し元へ伝播する。
 

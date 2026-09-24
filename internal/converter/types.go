@@ -1,16 +1,13 @@
 package converter
 
-import (
-	"context"
-	"fmt"
-)
-
+// Options controls the limits applied during document conversion.
 type Options struct {
 	MaxPages              int
 	MaxTextChars          int
 	DisableTextExtraction bool
 }
 
+// Artifact describes a single converted part (text and/or image) of a document.
 type Artifact struct {
 	PartNumber int     `json:"part_number"`
 	PageNumber *int    `json:"page_number"`
@@ -22,6 +19,8 @@ type Artifact struct {
 	SHA256     *string `json:"sha256"`
 }
 
+// Manifest describes the conversion output of a document: the source metadata
+// and the list of documents with their text and image artifacts.
 type Manifest struct {
 	SchemaVersion    int                `json:"schema_version"`
 	ConverterVersion string             `json:"converter_version"`
@@ -30,42 +29,23 @@ type Manifest struct {
 	Warnings         []string           `json:"warnings"`
 }
 
+// ManifestSource identifies the original source file.
 type ManifestSource struct {
 	MediaType string `json:"media_type"`
 	SHA256    string `json:"sha256"`
 }
 
+// ManifestDocument is one converted document (usually a single file).
 type ManifestDocument struct {
 	Name     string     `json:"name"`
 	TextPath string     `json:"text_path,omitempty"`
 	Parts    []Artifact `json:"parts"`
 }
 
+// Result is the outcome of a conversion: the manifest plus the artifacts and
+// warnings produced.
 type Result struct {
 	Manifest  Manifest
 	Artifacts []Artifact
 	Warnings  []string
-}
-
-type DocumentConverter interface {
-	Extension() string
-	MediaType() string
-	Validate(source string) error
-	Convert(ctx context.Context, source, outputDir string, options Options) (Result, error)
-}
-
-type PageLimitError struct {
-	Limit int
-}
-
-func (err *PageLimitError) Error() string {
-	return fmt.Sprintf("document exceeds the %d-page limit", err.Limit)
-}
-
-type TextLimitError struct {
-	Limit int
-}
-
-func (err *TextLimitError) Error() string {
-	return fmt.Sprintf("document exceeds the %d-character text limit", err.Limit)
 }

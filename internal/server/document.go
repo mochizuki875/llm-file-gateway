@@ -14,12 +14,17 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/converter"
 )
 
+// resolvedDocument is a document that has been resolved to its conversion
+// artifacts, either from an uploaded file or from inline data.
 type resolvedDocument struct {
 	filename   string
 	derivedDir string
 	manifest   converter.Manifest
 }
 
+// prepareDocument resolves a file reference (file_id, file_data, or file_url)
+// into a converted document. Inline data is written to a temporary directory
+// that is cleaned up after the request completes.
 func (server *Server) prepareDocument(ctx context.Context, reference map[string]any, tenantID, param string, temporary *[]string) (resolvedDocument, error) {
 	sources := 0
 	for _, key := range []string{"file_id", "file_data", "file_url"} {
@@ -72,7 +77,7 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 	if err := os.WriteFile(source, content, 0o600); err != nil {
 		return resolvedDocument{}, err
 	}
-	documentConverter, err := server.files.ResolveConverter(source)
+	documentConverter, err := server.files.ResolveConverter(ctx, source)
 	if err != nil {
 		return resolvedDocument{}, err
 	}
@@ -98,6 +103,9 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 	return resolvedDocument{filepath.Base(filename), filepath.Join(directory, "derived"), result.Manifest}, nil
 }
 
+// documentParts converts a resolved document into the content parts expected
+// by the Responses API (kind="responses") or Chat Completions API
+// (kind="chat"), including extracted text and base64 data URL images.
 func (server *Server) documentParts(document resolvedDocument, kind string) ([]any, error) {
 	if len(document.manifest.Documents) == 0 {
 		return nil, nil

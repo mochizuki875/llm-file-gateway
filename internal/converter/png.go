@@ -2,6 +2,7 @@ package converter
 
 import "context"
 
+// pngConverter converts PNG images.
 type pngConverter struct{}
 
 func (pngConverter) Extension() string { return ".png" }

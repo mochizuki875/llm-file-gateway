@@ -1,7 +1,6 @@
 package extractor
 
 import (
-	"errors"
 	"os"
 	"strings"
 	"unicode/utf8"
@@ -21,10 +20,10 @@ func readUTF8(path string) (string, error) {
 		content = content[3:]
 	}
 	if !utf8.Valid(content) {
-		return "", errors.New("text file must be valid UTF-8")
+		return "", &ValidationError{Message: "text file must be valid UTF-8"}
 	}
 	if strings.IndexByte(string(content), 0) >= 0 {
-		return "", errors.New("text file must not contain null bytes")
+		return "", &ValidationError{Message: "text file must not contain null bytes"}
 	}
 	return string(content), nil
 }

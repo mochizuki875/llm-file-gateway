@@ -20,6 +20,7 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/store"
 )
 
+// Server holds the dependencies shared by all HTTP handlers.
 type Server struct {
 	settings config.Config
 	store    *store.Store
@@ -27,6 +28,8 @@ type Server struct {
 	client   *http.Client
 }
 
+// NewHandler builds the HTTP handler that exposes the health, Files, Responses,
+// Chat Completions, and passthrough endpoints.
 func NewHandler(settings config.Config, dataStore *store.Store, fileService *files.Service) http.Handler {
 	server := &Server{
 		settings: settings, store: dataStore, files: fileService,
@@ -45,10 +48,14 @@ func NewHandler(settings config.Config, dataStore *store.Store, fileService *fil
 	return mux
 }
 
+// health reports that the process is running. It does not check connectivity
+// to SQLite, LibreOffice, or vLLM.
 func (server *Server) health(response http.ResponseWriter, _ *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// createFile handles POST /v1/files: it validates the multipart upload and
+// queues the file for asynchronous conversion.
 func (server *Server) createFile(response http.ResponseWriter, request *http.Request) {
 	tenantID, gatewayError := server.tenantID(request)
 	if gatewayError != nil {
@@ -65,6 +72,10 @@ func (server *Server) createFile(response http.ResponseWriter, request *http.Req
 	purpose := request.FormValue("purpose")
 	if purpose == "" {
 		purpose = "user_data"
+	}
+	if !validFilePurpose(purpose) {
+		writeError(response, apierror.New(400, "invalid_request", "Invalid purpose.", "purpose"))
+		return
 	}
 	ttl := server.settings.FileTTL
 	var expiresAfter struct {
@@ -102,6 +113,8 @@ func (server *Server) createFile(response http.ResponseWriter, request *http.Req
 	writeJSON(response, http.StatusOK, openAIFile(*record))
 }
 
+// listFiles handles GET /v1/files with limit, order, purpose, and after
+// pagination parameters.
 func (server *Server) listFiles(response http.ResponseWriter, request *http.Request) {
 	tenantID, gatewayError := server.tenantID(request)
 	if gatewayError != nil {
@@ -125,41 +138,51 @@ func (server *Server) listFiles(response http.ResponseWriter, request *http.Requ
 		writeError(response, apierror.New(422, "invalid_request", "order must be asc or desc.", "order"))
 		return
 	}
-	records, err := server.store.List(request.Context(), tenantID, limit+1, order, request.URL.Query().Get("after"))
+	purpose := request.URL.Query().Get("purpose")
+	records, err := server.store.List(request.Context(), tenantID, purpose, limit+1, order, request.URL.Query().Get("after"))
 	if err != nil {
 		writeAnyError(response, request, err)
 		return
 	}
-	purpose := request.URL.Query().Get("purpose")
-	filtered := make([]store.File, 0, len(records))
-	for _, record := range records {
-		if purpose == "" || purpose == record.Purpose {
-			filtered = append(filtered, record)
-		}
-	}
-	hasMore := len(filtered) > limit
+	hasMore := len(records) > limit
 	if hasMore {
-		filtered = filtered[:limit]
+		records = records[:limit]
 	}
-	data := make([]map[string]any, 0, len(filtered))
-	for _, record := range filtered {
+	data := make([]map[string]any, 0, len(records))
+	for _, record := range records {
 		data = append(data, openAIFile(record))
 	}
 	var firstID, lastID any
-	if len(filtered) > 0 {
-		firstID, lastID = filtered[0].ID, filtered[len(filtered)-1].ID
+	if len(records) > 0 {
+		firstID, lastID = records[0].ID, records[len(records)-1].ID
 	}
 	writeJSON(response, http.StatusOK, map[string]any{
 		"object": "list", "data": data, "first_id": firstID, "last_id": lastID, "has_more": hasMore,
 	})
 }
 
+// validFilePurpose reports whether purpose is one of the purposes accepted by
+// the OpenAI Files Create API. Output purposes (assistants_output,
+// batch_output, fine-tune-results) are assigned by the API to generated files
+// and are not valid create inputs.
+func validFilePurpose(purpose string) bool {
+	switch purpose {
+	case "assistants", "batch", "fine-tune", "vision", "user_data", "evals":
+		return true
+	default:
+		return false
+	}
+}
+
+// retrieveFile handles GET /v1/files/{file_id}.
 func (server *Server) retrieveFile(response http.ResponseWriter, request *http.Request) {
 	if record := server.ownedFile(response, request); record != nil {
 		writeJSON(response, http.StatusOK, openAIFile(*record))
 	}
 }
 
+// retrieveContent handles GET /v1/files/{file_id}/content and streams the
+// original uploaded file.
 func (server *Server) retrieveContent(response http.ResponseWriter, request *http.Request) {
 	record := server.ownedFile(response, request)
 	if record == nil {
@@ -170,6 +193,7 @@ func (server *Server) retrieveContent(response http.ResponseWriter, request *htt
 	http.ServeFile(response, request, filepath.Join(server.settings.DataDir, record.SourcePath))
 }
 
+// deleteFile handles DELETE /v1/files/{file_id}.
 func (server *Server) deleteFile(response http.ResponseWriter, request *http.Request) {
 	tenantID, gatewayError := server.tenantID(request)
 	if gatewayError != nil {
@@ -189,6 +213,9 @@ func (server *Server) deleteFile(response http.ResponseWriter, request *http.Req
 	writeJSON(response, http.StatusOK, map[string]any{"id": id, "object": "file", "deleted": true})
 }
 
+// ownedFile resolves the file_id path parameter to a file owned by the
+// authenticated tenant, writing an error response and returning nil when the
+// file does not exist.
 func (server *Server) ownedFile(response http.ResponseWriter, request *http.Request) *store.File {
 	tenantID, gatewayError := server.tenantID(request)
 	if gatewayError != nil {
@@ -208,6 +235,9 @@ func (server *Server) ownedFile(response http.ResponseWriter, request *http.Requ
 	return record
 }
 
+// tenantID resolves the tenant for a request. When authentication is disabled
+// it returns the shared tenant; otherwise it validates the bearer token and
+// derives a tenant ID from its SHA-256 hash.
 func (server *Server) tenantID(request *http.Request) (string, *apierror.Error) {
 	authorization := request.Header.Get("Authorization")
 	if !server.settings.GatewayAuthRequired {
@@ -224,6 +254,7 @@ func (server *Server) tenantID(request *http.Request) (string, *apierror.Error) 
 	return hex.EncodeToString(digest[:])[:32], nil
 }
 
+// openAIFile converts a store.File into the OpenAI Files API JSON shape.
 func openAIFile(record store.File) map[string]any {
 	status := "uploaded"
 	if record.Status == "processed" {
@@ -238,6 +269,8 @@ func openAIFile(record store.File) map[string]any {
 	}
 }
 
+// writeAnyError writes a gateway error when err is one, otherwise it logs the
+// unexpected error and writes a generic 500 response.
 func writeAnyError(response http.ResponseWriter, request *http.Request, err error) {
 	var gatewayError *apierror.Error
 	if errors.As(err, &gatewayError) {
@@ -248,6 +281,7 @@ func writeAnyError(response http.ResponseWriter, request *http.Request, err erro
 	writeError(response, apierror.New(500, "internal_error", "Internal server error.", ""))
 }
 
+// writeError writes an OpenAI-format error response.
 func writeError(response http.ResponseWriter, gatewayError *apierror.Error) {
 	var param any
 	if gatewayError.Param != "" {
@@ -261,6 +295,7 @@ func writeError(response http.ResponseWriter, gatewayError *apierror.Error) {
 	}})
 }
 
+// writeJSON writes value as a JSON response with the given status code.
 func writeJSON(response http.ResponseWriter, status int, value any) {
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(status)

@@ -22,7 +22,7 @@ func CSV(source string) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("CSV file is malformed: %w", err)
+			return "", &ValidationError{Message: fmt.Sprintf("CSV file is malformed: %v", err)}
 		}
 		lines = append(lines, strings.Join(row, "\t"))
 	}

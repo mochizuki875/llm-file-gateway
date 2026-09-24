@@ -19,6 +19,7 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 - Officeファイルのフォントやレイアウト、改ページの完全な再現は保証しません。
 - GatewayはステートフルなAll-in-One構成になっているため、複数インスタンスによるスケーリングには対応していません。
 - OpenAI Files APIのファイル変換、token使用量、回答品質との完全な一致は保証しません。
+- Responses APIの`input_file.detail`は受理しますが、`low`/`high`の変換品質には反映しません。ファイルは常にGatewayの既定の変換設定で処理され、モデルには`detail: "auto"`の画像として転送されます。
 - LLM File GatewayはOpenAI Files APIとの互換性を持たせることを目的としているため、一般的なGatewayに期待されるrate limit、request size制限などの機能は含まれていません。
 
 ## Supported APIs
@@ -94,9 +95,10 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | `GATEWAY_DATA_DIR` | No | `gateway-data` | SQLiteとファイルの保存先 |
 | `FILE_TTL_SECONDS` | No | `300` | デフォルトのファイル保持期間(sec)および`expires_after.seconds`で指定可能な上限値 |
 | `MAX_FILE_BYTES` | No | `52428800`(50 MiB) | 1ファイルの最大サイズ(bytes) |
-| `MAX_DOCUMENT_PAGES` | No | `20` | 画像変換する最大ページ数 |
+| `MAX_DOCUMENT_PAGES` | No | `50` | 画像変換する最大ページ数 |
 | `MAX_DOCUMENT_IMAGES` | No | `8` | 1ファイルからvLLMへ送る最大画像数 |
 | `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | 1ファイルから抽出するテキストの最大文字数（PDF、Officeを含む） |
+| `DOCUMENT_DPI` | No | `300` | PDF/Officeを画像へ変換する際の解像度(DPI)。1〜1200の整数 |
 | `DOCUMENT_TEXT_EXTRACTION_ENABLED` | No | `true` | PDFとOfficeからテキストを抽出するか |
 | `CONVERSION_WORKERS` | No | `2` | 並行してファイルを変換するworker数。正の整数で変更可能 |
 | `REQUEST_TIMEOUT_SECONDS` | No | `300` | vLLM通信のtimeout。streamingではstream全体に適用 |

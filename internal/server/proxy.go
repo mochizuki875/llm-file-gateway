@@ -15,14 +15,21 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/logging"
 )
 
+// hopByHopHeaders are connection-specific headers that must not be forwarded
+// to the upstream server.
 var hopByHopHeaders = map[string]bool{
 	"connection": true, "keep-alive": true, "proxy-authenticate": true,
 	"proxy-authorization": true, "te": true, "trailer": true,
 	"transfer-encoding": true, "upgrade": true, "host": true, "content-length": true,
 }
 
+// upstreamErrorPreviewBytes is the maximum number of upstream error body bytes
+// that are logged.
 const upstreamErrorPreviewBytes = 64 << 10
 
+// passthrough forwards any /v1/* request that is not handled by the gateway
+// itself to the vLLM server, replacing the client Authorization header with
+// the upstream API key.
 func (server *Server) passthrough(response http.ResponseWriter, request *http.Request) {
 	if _, gatewayError := server.tenantID(request); gatewayError != nil {
 		writeError(response, gatewayError)
@@ -69,6 +76,7 @@ func (server *Server) passthrough(response http.ResponseWriter, request *http.Re
 	}
 }
 
+// copyHeaders copies all non-hop-by-hop headers from source to destination.
 func copyHeaders(destination, source http.Header) {
 	for name, values := range source {
 		if hopByHopHeaders[strings.ToLower(name)] {
@@ -80,6 +88,9 @@ func copyHeaders(destination, source http.Header) {
 	}
 }
 
+// forwardJSON posts an expanded inference payload to the vLLM endpoint and
+// streams the response back to the client, flushing after each write when the
+// request is a streaming one.
 func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Request, endpoint string, payload map[string]any) {
 	content, _ := json.Marshal(payload)
 	upstreamURL := strings.TrimRight(server.settings.VLLMBaseURL.String(), "/") + "/" + endpoint
@@ -109,6 +120,8 @@ func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Re
 	}
 }
 
+// logUpstreamErrorResponse logs a preview of upstream error responses (without
+// logging file contents) and returns a reader that replays the full body.
 func (server *Server) logUpstreamErrorResponse(upstream *http.Response, message string, attributes ...any) io.Reader {
 	if upstream.StatusCode < http.StatusBadRequest {
 		return upstream.Body
@@ -144,6 +157,8 @@ func (server *Server) logUpstreamErrorResponse(upstream *http.Response, message 
 	return body
 }
 
+// flushWriter flushes the response after every write so that streaming
+// responses reach the client immediately.
 type flushWriter struct {
 	response   http.ResponseWriter
 	controller *http.ResponseController
@@ -160,10 +175,13 @@ func (writer flushWriter) Write(content []byte) (int, error) {
 	return written, nil
 }
 
+// upstreamAuthorization returns the bearer token used to authenticate with vLLM.
 func (server *Server) upstreamAuthorization() string {
 	return "Bearer " + server.settings.VLLMAPIKey
 }
 
+// safeHTTPError unwraps url.Error so that the underlying network error is
+// logged without the full URL.
 func safeHTTPError(err error) error {
 	var urlError *url.Error
 	if errors.As(err, &urlError) {

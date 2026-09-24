@@ -78,6 +78,67 @@ func TestFileLifecycle(t *testing.T) {
 		t.Fatalf("file lifetime = %d seconds, want 120", expiresAt-createdAt)
 	}
 
+	invalidBody := &bytes.Buffer{}
+	invalidForm := multipart.NewWriter(invalidBody)
+	invalidFile, err := invalidForm.CreateFormFile("file", "notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(invalidFile, "invalid purpose")
+	_ = invalidForm.WriteField("purpose", "unsupported")
+	if err := invalidForm.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/files", invalidBody)
+	request.Header.Set("Content-Type", invalidForm.FormDataContentType())
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid purpose status = %d: %s", response.Code, response.Body.String())
+	}
+
+	// Output purposes are not valid Files Create API inputs.
+	for _, purpose := range []string{"assistants_output", "batch_output", "fine-tune-results"} {
+		outputBody := &bytes.Buffer{}
+		outputForm := multipart.NewWriter(outputBody)
+		outputFile, err := outputForm.CreateFormFile("file", "notes.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(outputFile, "output purpose")
+		_ = outputForm.WriteField("purpose", purpose)
+		if err := outputForm.Close(); err != nil {
+			t.Fatal(err)
+		}
+		request = httptest.NewRequest(http.MethodPost, "/v1/files", outputBody)
+		request.Header.Set("Content-Type", outputForm.FormDataContentType())
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("purpose %q status = %d: %s", purpose, response.Code, response.Body.String())
+		}
+	}
+
+	// evals is a valid Files Create API purpose.
+	evalsBody := &bytes.Buffer{}
+	evalsForm := multipart.NewWriter(evalsBody)
+	evalsFile, err := evalsForm.CreateFormFile("file", "notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(evalsFile, "evals purpose")
+	_ = evalsForm.WriteField("purpose", "evals")
+	if err := evalsForm.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/files", evalsBody)
+	request.Header.Set("Content-Type", evalsForm.FormDataContentType())
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("evals purpose status = %d: %s", response.Code, response.Body.String())
+	}
+
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		request = httptest.NewRequest(http.MethodGet, "/v1/files/"+id, nil)
@@ -667,6 +728,266 @@ func TestRequiredAuthenticationUsesUpstreamKey(t *testing.T) {
 	}
 }
 
+func TestRetrieveContent(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	handler := NewHandler(settings, dataStore, service)
+	body := &bytes.Buffer{}
+	form := multipart.NewWriter(body)
+	file, err := form.CreateFormFile("file", "notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(file, "content payload 123")
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("create status = %d: %s", response.Code, response.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created["id"].(string)
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/files/"+id+"/content", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("content status = %d: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); got != "text/plain" {
+		t.Fatalf("content type = %q, want text/plain", got)
+	}
+	if got := response.Header().Get("Content-Disposition"); !strings.Contains(got, "notes.txt") {
+		t.Fatalf("content disposition = %q", got)
+	}
+	if got := response.Body.String(); got != "content payload 123" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestListFiles(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	handler := NewHandler(settings, dataStore, service)
+	create := func(name, purpose string) string {
+		t.Helper()
+		body := &bytes.Buffer{}
+		form := multipart.NewWriter(body)
+		file, err := form.CreateFormFile("file", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(file, "list test content")
+		_ = form.WriteField("purpose", purpose)
+		if err := form.Close(); err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+		request.Header.Set("Content-Type", form.FormDataContentType())
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("create %s status = %d: %s", name, response.Code, response.Body.String())
+		}
+		var created map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+			t.Fatal(err)
+		}
+		return created["id"].(string)
+	}
+	firstID := create("first.txt", "user_data")
+	// created_at is stored with second precision, so wait to make the cursor
+	// comparison in the after-filter deterministic.
+	time.Sleep(1100 * time.Millisecond)
+	secondID := create("second.txt", "assistants")
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/files", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
+	}
+	var list struct {
+		Object  string           `json:"object"`
+		Data    []map[string]any `json:"data"`
+		FirstID any              `json:"first_id"`
+		LastID  any              `json:"last_id"`
+		HasMore bool             `json:"has_more"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Object != "list" || len(list.Data) != 2 || list.HasMore {
+		t.Fatalf("list = %#v", list)
+	}
+	// Default order is desc (newest first), so the second file is first.
+	if list.FirstID != secondID || list.LastID != firstID {
+		t.Fatalf("first_id = %v, last_id = %v", list.FirstID, list.LastID)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/files?limit=1", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 || !list.HasMore {
+		t.Fatalf("limited list = %#v", list)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/files?purpose=assistants", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 || list.Data[0]["id"] != secondID {
+		t.Fatalf("purpose-filtered list = %#v", list)
+	}
+
+	_ = create("third.txt", "user_data")
+	time.Sleep(1100 * time.Millisecond)
+	fourthID := create("fourth.txt", "assistants")
+	request = httptest.NewRequest(http.MethodGet, "/v1/files?purpose=assistants&limit=1", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 || list.Data[0]["id"] != fourthID || !list.HasMore {
+		t.Fatalf("first purpose-filtered page = %#v", list)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/v1/files?purpose=assistants&limit=1&after="+fourthID, nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 || list.Data[0]["id"] != secondID || list.HasMore {
+		t.Fatalf("second purpose-filtered page = %#v", list)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/files?after="+secondID, nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 || list.Data[0]["id"] != firstID {
+		t.Fatalf("after-filtered list = %#v", list)
+	}
+
+	for _, query := range []string{"limit=0", "limit=10001", "limit=abc", "order=sideways"} {
+		request = httptest.NewRequest(http.MethodGet, "/v1/files?"+query, nil)
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("query %q status = %d, want 422", query, response.Code)
+		}
+	}
+}
+
+func TestExpandChat(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "chat_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+
+	payload := map[string]any{
+		"model": "test-model",
+		"messages": []any{map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "file", "file": map[string]any{
+					"file_data": base64.StdEncoding.EncodeToString([]byte("chat document")),
+					"filename":  "notes.txt",
+				}},
+				map[string]any{"type": "text", "text": "Summarize."},
+			},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("chat status = %d: %s", response.Code, response.Body.String())
+	}
+	messages := upstreamPayload["messages"].([]any)
+	system := messages[0].(map[string]any)
+	if system["role"] != "system" || !strings.Contains(system["content"].(string), "untrusted content") {
+		t.Fatalf("system message = %#v", system)
+	}
+	content := messages[1].(map[string]any)["content"].([]any)
+	first := content[0].(map[string]any)
+	if first["type"] != "text" || !strings.Contains(first["text"].(string), "chat document") {
+		t.Fatalf("expanded content = %#v", content)
+	}
+	entries, err := os.ReadDir(filepath.Join(settings.DataDir, "work"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("temporary entries = %v, %v", entries, err)
+	}
+}
+
+func TestExpandChatRejectsFileURL(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+	payload := map[string]any{
+		"model": "test-model",
+		"messages": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "file", "file": map[string]any{"file_url": "https://example.com/notes.txt"},
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "invalid_file_reference" {
+		t.Fatalf("error code = %q", result.Error.Code)
+	}
+}
+
+func TestExpandChatRejectsNonArrayMessages(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","messages":"hello"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func testDependencies(t *testing.T) (config.Config, *store.Store, *files.Service) {
 	t.Helper()
 	dataDir := t.TempDir()
@@ -676,19 +997,15 @@ func testDependencies(t *testing.T) (config.Config, *store.Store, *files.Service
 	}
 	settings := config.Config{
 		DataDir: dataDir, FileTTL: 5 * time.Minute, MaxFileBytes: 1024,
-		MaxDocumentPages: 20, MaxDocumentTextChars: 500_000, ConversionWorkers: 2,
+		MaxDocumentPages: 20, MaxDocumentTextChars: 500_000, Workers: 2,
 		VLLMAPIKey: "upstream-key",
 	}
 	if err := os.Mkdir(filepath.Join(dataDir, "work"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	registry, err := converter.NewDefaultRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := files.New(settings, dataStore, converter.NewDispatcher(registry))
+	service := files.New(settings, dataStore, converter.NewDispatcher(converter.NewInTreeRegistry(), converter.DefaultConverterConfig(), nil))
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := service.Start(ctx); err != nil {
+	if err := service.Run(ctx, settings.Workers); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {

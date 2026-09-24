@@ -10,8 +10,11 @@ import (
 	"time"
 )
 
+// defaultFileTTL is the default file retention period used when
+// FILE_TTL_SECONDS is not set.
 const defaultFileTTL = 5 * time.Minute
 
+// Config holds all validated gateway settings loaded from environment variables.
 type Config struct {
 	Address               string
 	VLLMModel             string
@@ -25,12 +28,15 @@ type Config struct {
 	MaxDocumentPages      int
 	MaxDocumentImages     int
 	MaxDocumentTextChars  int
+	DocumentDPI           int
 	TextExtractionEnabled bool
-	ConversionWorkers     int
+	Workers               int
 	RequestTimeout        time.Duration
 	LogVerbosity          int
 }
 
+// Load reads and validates the gateway configuration from environment
+// variables, applying defaults where a variable is unset.
 func Load() (Config, error) {
 	model := os.Getenv("VLLM_MODEL")
 	if model == "" {
@@ -61,7 +67,7 @@ func Load() (Config, error) {
 	if err != nil || maxFileBytes < 1 {
 		return Config{}, fmt.Errorf("MAX_FILE_BYTES must be a positive integer")
 	}
-	maxPages, err := envInt("MAX_DOCUMENT_PAGES", 20)
+	maxPages, err := envInt("MAX_DOCUMENT_PAGES", 50)
 	if err != nil || maxPages < 1 {
 		return Config{}, fmt.Errorf("MAX_DOCUMENT_PAGES must be a positive integer")
 	}
@@ -73,12 +79,16 @@ func Load() (Config, error) {
 	if err != nil || maxTextChars < 1 {
 		return Config{}, fmt.Errorf("MAX_DOCUMENT_TEXT_CHARS must be a positive integer")
 	}
+	documentDPI, err := envInt("DOCUMENT_DPI", 300)
+	if err != nil || documentDPI < 1 || documentDPI > 1200 {
+		return Config{}, fmt.Errorf("DOCUMENT_DPI must be an integer between 1 and 1200")
+	}
 	textExtractionEnabled, err := envBool("DOCUMENT_TEXT_EXTRACTION_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}
-	conversionWorkers, err := envInt("CONVERSION_WORKERS", 2)
-	if err != nil || conversionWorkers < 1 {
+	workers, err := envInt("CONVERSION_WORKERS", 2)
+	if err != nil || workers < 1 {
 		return Config{}, fmt.Errorf("CONVERSION_WORKERS must be a positive integer")
 	}
 	timeoutSeconds, err := envFloat("REQUEST_TIMEOUT_SECONDS", 300)
@@ -103,8 +113,9 @@ func Load() (Config, error) {
 		MaxDocumentPages:      maxPages,
 		MaxDocumentImages:     maxImages,
 		MaxDocumentTextChars:  maxTextChars,
+		DocumentDPI:           documentDPI,
 		TextExtractionEnabled: textExtractionEnabled,
-		ConversionWorkers:     conversionWorkers,
+		Workers:               workers,
 		RequestTimeout:        time.Duration(timeoutSeconds * float64(time.Second)),
 		LogVerbosity:          logVerbosity,
 	}
@@ -117,6 +128,8 @@ func Load() (Config, error) {
 	return config, nil
 }
 
+// envString returns the value of the named environment variable, or the
+// fallback when it is unset or empty.
 func envString(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
@@ -124,6 +137,8 @@ func envString(name, fallback string) string {
 	return fallback
 }
 
+// envBool parses the named environment variable as a boolean, using the
+// fallback when it is unset.
 func envBool(name string, fallback bool) (bool, error) {
 	value := os.Getenv(name)
 	if value == "" {
@@ -136,11 +151,15 @@ func envBool(name string, fallback bool) (bool, error) {
 	return parsed, nil
 }
 
+// envInt parses the named environment variable as an int, using the fallback
+// when it is unset.
 func envInt(name string, fallback int) (int, error) {
 	value, err := envInt64(name, int64(fallback))
 	return int(value), err
 }
 
+// envInt64 parses the named environment variable as an int64, using the
+// fallback when it is unset.
 func envInt64(name string, fallback int64) (int64, error) {
 	value := os.Getenv(name)
 	if value == "" {
@@ -153,6 +172,8 @@ func envInt64(name string, fallback int64) (int64, error) {
 	return parsed, nil
 }
 
+// envFloat parses the named environment variable as a float64, using the
+// fallback when it is unset.
 func envFloat(name string, fallback float64) (float64, error) {
 	value := os.Getenv(name)
 	if value == "" {

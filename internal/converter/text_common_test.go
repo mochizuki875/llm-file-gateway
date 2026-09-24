@@ -49,18 +49,15 @@ func TestRejectsInvalidTextAndUnsupportedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatcher := newDefaultDispatcherForTest()
-	documentConverter, err := dispatcher.ResolveConverter(invalid)
+	documentConverter, err := dispatcher.ResolveConverter(context.Background(), invalid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := documentConverter.Validate(invalid); err == nil || !strings.Contains(err.Error(), "UTF-8") {
 		t.Fatalf("invalid UTF-8 error = %v", err)
 	}
-	registry, err := NewDefaultRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := registry.Converter(".rtf"); err == nil {
+	registry := NewInTreeRegistry()
+	if _, err := registry.Converter(context.Background(), ".rtf", DefaultConverterConfig(), nil); err == nil {
 		t.Fatal(".rtf unexpectedly supported")
 	}
 }
@@ -74,7 +71,7 @@ func TestUnknownTextFormatsUsePlainTextFallback(t *testing.T) {
 			if err := os.WriteFile(source, []byte(want), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			documentConverter, err := newDefaultDispatcherForTest().ResolveConverter(name)
+			documentConverter, err := newDefaultDispatcherForTest().ResolveConverter(context.Background(), name)
 			if err != nil || documentConverter.MediaType() != "text/plain" {
 				t.Fatalf("converter = %#v, %v; want text/plain", documentConverter, err)
 			}
@@ -97,7 +94,7 @@ func TestUnknownTextFormatsUsePlainTextFallback(t *testing.T) {
 	if err := os.WriteFile(binary, []byte{'P', 'K', 0, 1, 2}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	documentConverter, err := newDefaultDispatcherForTest().ResolveConverter(binary)
+	documentConverter, err := newDefaultDispatcherForTest().ResolveConverter(context.Background(), binary)
 	if err != nil {
 		t.Fatal(err)
 	}

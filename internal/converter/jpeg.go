@@ -2,6 +2,7 @@ package converter
 
 import "context"
 
+// jpegConverter converts JPEG images.
 type jpegConverter struct{}
 
 func (jpegConverter) Extension() string { return ".jpeg" }

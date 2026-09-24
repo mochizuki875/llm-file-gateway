@@ -1,24 +1,37 @@
 package converter
 
-import "github.com/mochizuki875/llm-file-gateway/internal/converter/extractor"
+import (
+	"context"
 
+	"github.com/mochizuki875/llm-file-gateway/internal/converter/extractor"
+)
+
+// Dispatcher resolves converters by path and falls back to the plain-text
+// converter for unknown extensions.
 type Dispatcher struct {
-	registry *Registry
-	fallback DocumentConverter
+	registry      Registry
+	configuration ConverterConfig
+	handle        ConverterHandle
+	fallback      DocumentConverter
 }
 
-func NewDispatcher(registry *Registry) *Dispatcher {
+// NewDispatcher creates a dispatcher with a plain-text fallback converter.
+func NewDispatcher(registry Registry, configuration ConverterConfig, handle ConverterHandle) *Dispatcher {
 	if registry == nil {
 		panic("converter registry must not be nil")
 	}
 	return &Dispatcher{
-		registry: registry,
-		fallback: newTextConverter("", "text/plain", extractor.PlainText),
+		registry:      registry,
+		configuration: configuration,
+		handle:        handle,
+		fallback:      newTextConverter("", "text/plain", extractor.PlainText),
 	}
 }
 
-func (dispatcher *Dispatcher) ResolveConverter(path string) (DocumentConverter, error) {
-	documentConverter, err := dispatcher.registry.ForPath(path)
+// ResolveConverter returns the converter for the given path, falling back to
+// the plain-text converter when no converter is registered.
+func (dispatcher *Dispatcher) ResolveConverter(ctx context.Context, path string) (DocumentConverter, error) {
+	documentConverter, err := dispatcher.registry.ForPath(ctx, path, dispatcher.configuration, dispatcher.handle)
 	if err != nil && dispatcher.fallback != nil {
 		return dispatcher.fallback, nil
 	}
