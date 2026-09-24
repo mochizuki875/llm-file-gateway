@@ -51,18 +51,27 @@ func run() error {
 		}
 	}
 
+	// Set up context for graceful shutdown on SIGINT or SIGTERM signals.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Set up the default converter registry.
 	registry, err := converter.NewDefaultRegistry()
 	if err != nil {
 		return err
 	}
+
+	// Set up the file service with the converter dispatcher.
 	fileService := files.New(settings, dataStore, converter.NewDispatcher(registry))
+
+	// Start the file service.
+	// Worker goroutines will start and begin processing pending files.
 	if err := fileService.Start(ctx); err != nil {
 		return err
 	}
 	defer fileService.Stop()
 
+	// Set up the HTTP server for the gateway.
 	httpServer := &http.Server{
 		Addr:              settings.Address,
 		Handler:           server.NewHandler(settings, dataStore, fileService),

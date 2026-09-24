@@ -217,6 +217,7 @@ func (store *Store) Delete(ctx context.Context, id, tenantID string) (bool, erro
 	return count == 1, err
 }
 
+// Pending retrieves the IDs of files that are either uploaded or processing and have not expired or been deleted.
 func (store *Store) Pending(ctx context.Context) ([]string, error) {
 	return store.selectIDs(ctx,
 		"SELECT id FROM files WHERE status IN ('uploaded', 'processing') AND deleted_at IS NULL AND expires_at > ?",

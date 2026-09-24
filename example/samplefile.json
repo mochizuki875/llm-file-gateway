@@ -1,0 +1,57 @@
+{
+  "company": "Northstar Labs",
+  "generated_for": "Sample Dataset",
+  "employees": [
+    {
+      "id": 1,
+      "name": "Emily Carter",
+      "department": "Engineering",
+      "role": "Backend Engineer",
+      "country": "United States",
+      "skills": [
+        "Python",
+        "Go",
+        "PostgreSQL"
+      ],
+      "active": true
+    },
+    {
+      "id": 2,
+      "name": "Liam Wilson",
+      "department": "Marketing",
+      "role": "Content Strategist",
+      "country": "Canada",
+      "skills": [
+        "SEO",
+        "Analytics",
+        "Copywriting"
+      ],
+      "active": true
+    },
+    {
+      "id": 3,
+      "name": "Sophia Brown",
+      "department": "Finance",
+      "role": "Financial Analyst",
+      "country": "United Kingdom",
+      "skills": [
+        "Excel",
+        "Forecasting",
+        "Reporting"
+      ],
+      "active": true
+    }
+  ],
+  "projects": [
+    {
+      "name": "Aurora",
+      "status": "In Progress",
+      "budget_usd": 125000
+    },
+    {
+      "name": "Atlas",
+      "status": "Planning",
+      "budget_usd": 80000
+    }
+  ]
+}

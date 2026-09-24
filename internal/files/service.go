@@ -50,18 +50,27 @@ func (service *Service) ResolveConverter(path string) (converter.DocumentConvert
 func (service *Service) Start(ctx context.Context) error {
 	workerContext, cancel := context.WithCancel(ctx)
 	service.cancel = cancel
+
+	// Retrieve the list of pending files from the store.
 	pending, err := service.store.Pending(ctx)
 	if err != nil {
 		return err
 	}
+
+	// Start the worker goroutines for file conversion.
 	service.wait.Add(service.settings.ConversionWorkers + 1)
 	for range service.settings.ConversionWorkers {
 		go service.worker(workerContext)
 	}
+
+	// Start the janitor goroutine for cleaning up expired files.
 	go service.janitor(workerContext)
+
+	// Enqueue the pending files for conversion.
 	for _, id := range pending {
 		service.enqueue(workerContext, conversionJob{id: id})
 	}
+
 	slog.Info("file service started", "workers", service.settings.ConversionWorkers, "pending_files", len(pending))
 	return nil
 }
