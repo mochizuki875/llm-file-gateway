@@ -2,6 +2,7 @@ package converter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -12,6 +13,12 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/config"
 	"github.com/mochizuki875/llm-file-gateway/internal/converter/extractor"
 )
+
+// ErrConverterNotFound is returned by Registry.Converter when no converter is
+// registered for the requested extension. Dispatcher.ResolveConverter uses
+// errors.Is to distinguish this "no converter" case from factory failures so
+// that only unknown extensions fall back to the plain-text converter.
+var ErrConverterNotFound = errors.New("converter not found")
 
 // ConverterConfig holds the static configuration passed to converter factories
 // when they are instantiated.
@@ -99,7 +106,7 @@ func (registry Registry) Converter(ctx context.Context, extension string, config
 		if normalized == "" {
 			normalized = "(none)"
 		}
-		return nil, fmt.Errorf("unsupported file type: %s", normalized)
+		return nil, fmt.Errorf("%w: %s", ErrConverterNotFound, normalized)
 	}
 	return factory(ctx, configuration, handle)
 }

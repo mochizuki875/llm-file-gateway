@@ -13,7 +13,7 @@ func validateSignature(source string, signatures ...[]byte) error {
 	if err != nil {
 		return err
 	}
-	defer input.Close()
+	defer func() { _ = input.Close() }()
 	header := make([]byte, 8)
 	read, err := io.ReadFull(input, header)
 	if err != nil && err != io.ErrUnexpectedEOF {

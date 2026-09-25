@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -34,7 +35,7 @@ func TestResolveMissingFileLogsWarning(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	service := New(config.Config{DataDir: dataDir}, dataStore, testDispatcher(t))
-	if _, _, err := service.Resolve(context.Background(), "file_missing", "tenant-a", "input[0].file_id"); err == nil {
+	if _, _, _, err := service.Resolve(context.Background(), "file_missing", "tenant-a", "input[0].file_id"); err == nil {
 		t.Fatal("Resolve() succeeded for a missing file")
 	}
 	logOutput := output.String()
@@ -88,6 +89,153 @@ func TestDeleteExpiredRemovesDatabaseRecordAndFiles(t *testing.T) {
 		if !strings.Contains(logOutput, expected) {
 			t.Fatalf("log output = %q, missing %q", logOutput, expected)
 		}
+	}
+}
+
+func TestDeleteExpiredRecoversLogicallyDeletedRecordAfterRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	relativeSource := filepath.Join("files", "tenant-a", "file_deleted", "source.txt")
+	source := filepath.Join(dataDir, relativeSource)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("deleted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	record := store.File{
+		ID: "file_deleted", TenantID: "tenant-a", Filename: "source.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "processed",
+		SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if marked, err := dataStore.MarkDeleted(context.Background(), record.ID, record.TenantID); err != nil || !marked {
+		t.Fatalf("MarkDeleted() = %t, %v", marked, err)
+	}
+
+	restartedService := New(config.Config{DataDir: dataDir}, dataStore, testDispatcher(t))
+	restartedService.deleteExpired(context.Background())
+
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
+	}
+	if _, err := os.Stat(filepath.Dir(source)); !os.IsNotExist(err) {
+		t.Fatalf("artifact directory still exists: %v", err)
+	}
+}
+
+func TestDeleteExpiredRetriesAfterCleanupFailure(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	blocker := filepath.Join(dataDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relativeSource := filepath.Join("blocker", "file_retry", "source.txt")
+	now := time.Now().Unix()
+	record := store.File{
+		ID: "file_retry", TenantID: "tenant-a", Filename: "source.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "processed",
+		SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if marked, err := dataStore.MarkDeleted(context.Background(), record.ID, record.TenantID); err != nil || !marked {
+		t.Fatalf("MarkDeleted() = %t, %v", marked, err)
+	}
+	service := New(config.Config{DataDir: dataDir}, dataStore, testDispatcher(t))
+
+	service.deleteExpired(context.Background())
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current == nil || !current.DeletedAt.Valid {
+		t.Fatalf("record after failed cleanup = %#v, %v; want logically deleted", current, err)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dataDir, relativeSource)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("deleted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	service.deleteExpired(context.Background())
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record after retry = %#v, %v; want nil", current, err)
+	}
+}
+
+func TestDeleteCompletesAfterRequestCancellation(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	relativeSource := filepath.Join("files", "tenant-a", "file_cancel", "source.txt")
+	source := filepath.Join(dataDir, relativeSource)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("deleted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	record := store.File{
+		ID: "file_cancel", TenantID: "tenant-a", Filename: "source.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "processed",
+		SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	service := New(config.Config{DataDir: dataDir}, dataStore, testDispatcher(t))
+	release, err := service.acquireLease(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	deleted := make(chan error, 1)
+	go func() {
+		ok, err := service.Delete(ctx, record.ID, record.TenantID)
+		if err == nil && !ok {
+			err = errors.New("Delete reported false")
+		}
+		deleted <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		current, err := dataStore.GetInternal(context.Background(), record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current != nil && current.DeletedAt.Valid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Delete did not mark the record")
+		}
+	}
+	cancel()
+	release()
+	if err := <-deleted; err != nil {
+		t.Fatal(err)
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
 	}
 }
 
@@ -147,6 +295,119 @@ func TestStartResumesPendingConversion(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("pending conversion was not resumed")
+}
+
+func TestReconcileStorageRemovesOnlyOrphanManagedDirectories(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+
+	statuses := []string{"uploaded", "processing", "processed", "failed"}
+	for index, status := range statuses {
+		id := fmt.Sprintf("file_%032x", index+1)
+		relativeSource := filepath.Join("files", "tenant-a", id, "source.txt")
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dataDir, relativeSource)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		record := store.File{
+			ID: id, TenantID: "tenant-a", Filename: "source.txt", MediaType: "text/plain",
+			Purpose: "user_data", Bytes: 1, SHA256: "digest", Status: status,
+			SourcePath: filepath.ToSlash(relativeSource), CreatedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		}
+		if err := dataStore.Add(context.Background(), record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deletedID := "file_00000000000000000000000000000005"
+	deletedDir := filepath.Join(dataDir, "files", "tenant-a", deletedID)
+	if err := os.MkdirAll(deletedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deletedRecord := store.File{
+		ID: deletedID, TenantID: "tenant-a", Filename: "source.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 1, SHA256: "digest", Status: "processed",
+		SourcePath: filepath.ToSlash(filepath.Join("files", "tenant-a", deletedID, "source.txt")),
+		CreatedAt:  time.Now().Unix(), ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	}
+	if err := dataStore.Add(context.Background(), deletedRecord); err != nil {
+		t.Fatal(err)
+	}
+	if marked, err := dataStore.MarkDeleted(context.Background(), deletedID, "tenant-a"); err != nil || !marked {
+		t.Fatalf("MarkDeleted() = %t, %v", marked, err)
+	}
+	missingDirectoryID := "file_00000000000000000000000000000006"
+	missingDirectoryRecord := deletedRecord
+	missingDirectoryRecord.ID = missingDirectoryID
+	missingDirectoryRecord.Status = "uploaded"
+	missingDirectoryRecord.SourcePath = filepath.ToSlash(filepath.Join("files", "tenant-a", missingDirectoryID, "source.txt"))
+	if err := dataStore.Add(context.Background(), missingDirectoryRecord); err != nil {
+		t.Fatal(err)
+	}
+
+	orphanDir := filepath.Join(dataDir, "files", "tenant-a", "file_ffffffffffffffffffffffffffffffff")
+	unrelatedDir := filepath.Join(dataDir, "files", "tenant-a", "manual-directory")
+	externalDir := filepath.Join(dataDir, "external")
+	for _, directory := range []string{orphanDir, unrelatedDir, externalDir} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(dataDir, "files", "tenant-a", "file_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	if err := os.Symlink(externalDir, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "files", "tenant-a", "unrelated.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.ReconcileStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
+		t.Fatalf("orphan directory still exists: %v", err)
+	}
+	for _, path := range []string{deletedDir, unrelatedDir, externalDir, link} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("retained path %q missing: %v", path, err)
+		}
+	}
+	for index := range statuses {
+		id := fmt.Sprintf("file_%032x", index+1)
+		if _, err := os.Stat(filepath.Join(dataDir, "files", "tenant-a", id)); err != nil {
+			t.Fatalf("record-backed directory %s missing: %v", id, err)
+		}
+	}
+	if record, err := dataStore.GetInternal(context.Background(), missingDirectoryID); err != nil || record == nil {
+		t.Fatalf("DB-only record = %#v, %v; want retained", record, err)
+	}
+}
+
+func TestCreateUsesOwnerOnlyPermissions(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	record, err := service.Create(context.Background(), "notes.txt", strings.NewReader("secret"), "user_data", "tenant-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dataDir, record.SourcePath)
+	for path, want := range map[string]os.FileMode{filepath.Dir(source): 0o700, source: 0o600} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("mode of %s = %04o, want %04o", path, got, want)
+		}
+	}
 }
 
 func testDispatcher(t *testing.T) *converter.Dispatcher {
@@ -225,6 +486,53 @@ func TestCreateRejectsOversizedFile(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("leftover file directories = %v", entries)
+	}
+}
+
+func TestCreateUnlimitedFileSize(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	settings := testSettings(dataDir)
+	settings.MaxFileBytes = 0
+	service := New(settings, dataStore, testDispatcher(t))
+
+	content := strings.Repeat("x", 4096)
+	record, err := service.Create(context.Background(), "notes.txt", strings.NewReader(content), "user_data", "tenant-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Bytes != int64(len(content)) {
+		t.Fatalf("bytes = %d, want %d", record.Bytes, len(content))
+	}
+	source := filepath.Join(dataDir, record.SourcePath)
+	stored, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != content {
+		t.Fatalf("stored content length = %d, want %d", len(stored), len(content))
+	}
+}
+
+func TestCreateUnlimitedTTLStoresZeroExpiry(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+
+	record, err := service.Create(context.Background(), "notes.txt", strings.NewReader("content"), "user_data", "tenant-a", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ExpiresAt != 0 {
+		t.Fatalf("ExpiresAt = %d, want 0 (never expires)", record.ExpiresAt)
 	}
 }
 
@@ -337,7 +645,7 @@ func TestResolveStatuses(t *testing.T) {
 			if err := dataStore.Add(context.Background(), record); err != nil {
 				t.Fatal(err)
 			}
-			_, _, err := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
+			_, _, _, err := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
 			var gatewayError *apierror.Error
 			if !errors.As(err, &gatewayError) || gatewayError.Status != test.wantStatus || gatewayError.Code != test.wantCode {
 				t.Fatalf("error = %v, want %d %s", err, test.wantStatus, test.wantCode)
@@ -383,12 +691,159 @@ func TestResolveProcessedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gotRecord, gotManifest, err := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
+	gotRecord, gotManifest, release, err := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if release == nil {
+		t.Fatal("Resolve() returned a nil release function")
+	}
 	if gotRecord.ID != record.ID || gotManifest.SchemaVersion != 3 || len(gotManifest.Documents) != 1 {
 		t.Fatalf("resolved = %#v, %#v", gotRecord, gotManifest)
+	}
+	release()
+}
+
+func TestDeleteWaitsForActiveLease(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	relativeDir := filepath.Join("files", "tenant-a", "file_leased")
+	manifestPath := filepath.Join(relativeDir, "manifest.json")
+	manifest := converter.Manifest{
+		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+	}
+	encoded, _ := json.Marshal(manifest)
+	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, manifestPath), encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := store.File{
+		ID: "file_leased", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 5, SHA256: "digest", Status: "processed",
+		SourcePath:   filepath.ToSlash(filepath.Join(relativeDir, "source.txt")),
+		ManifestPath: sql.NullString{String: filepath.ToSlash(manifestPath), Valid: true},
+		CreatedAt:    now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, release, err := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleted := make(chan bool, 1)
+	go func() {
+		ok, err := service.Delete(context.Background(), record.ID, "tenant-a")
+		if err != nil {
+			t.Errorf("Delete() error = %v", err)
+			deleted <- false
+			return
+		}
+		deleted <- ok
+	}()
+
+	// Delete must not complete while the lease is held.
+	select {
+	case <-deleted:
+		t.Fatal("Delete() completed while a lease was held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case ok := <-deleted:
+		if !ok {
+			t.Fatal("Delete() reported no file deleted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Delete() did not complete after lease release")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, relativeDir)); !os.IsNotExist(err) {
+		t.Fatalf("file directory still exists after delete: %v", err)
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
+	}
+}
+
+func TestDeleteExpiredWaitsForActiveLease(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	relativeDir := filepath.Join("files", "tenant-a", "file_expired_leased")
+	manifestPath := filepath.Join(relativeDir, "manifest.json")
+	manifest := converter.Manifest{
+		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+	}
+	encoded, _ := json.Marshal(manifest)
+	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, manifestPath), encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := store.File{
+		ID: "file_expired_leased", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 5, SHA256: "digest", Status: "processed",
+		SourcePath:   filepath.ToSlash(filepath.Join(relativeDir, "source.txt")),
+		ManifestPath: sql.NullString{String: filepath.ToSlash(manifestPath), Valid: true},
+		CreatedAt:    now - 60, ExpiresAt: now - 1,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolve rejects expired files, so acquire the lease directly to
+	// simulate an inference request that is reading the artifacts.
+	release, err := service.acquireLease(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		service.deleteExpired(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("deleteExpired() completed while a lease was held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deleteExpired() did not complete after lease release")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, relativeDir)); !os.IsNotExist(err) {
+		t.Fatalf("file directory still exists after expiry: %v", err)
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
 	}
 }
 
@@ -411,10 +866,203 @@ func TestResolveMissingManifest(t *testing.T) {
 	if err := dataStore.Add(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
-	_, _, resolveErr := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
+	_, _, _, resolveErr := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
 	var gatewayError *apierror.Error
 	if !errors.As(resolveErr, &gatewayError) || gatewayError.Status != 422 || gatewayError.Code != "file_processing_failed" {
 		t.Fatalf("error = %v", resolveErr)
+	}
+}
+
+// TestResolveRejectsFileDeletedConcurrently verifies that Resolve cannot
+// acquire a lease on a file whose deletion has already started (TOCTOU
+// between the store lookup and the lease acquisition). The test controls the
+// race timing deterministically by starting deletion before Resolve runs.
+func TestResolveRejectsFileDeletedConcurrently(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	relativeDir := filepath.Join("files", "tenant-a", "file_toc")
+	manifestPath := filepath.Join(relativeDir, "manifest.json")
+	manifest := converter.Manifest{
+		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+	}
+	encoded, _ := json.Marshal(manifest)
+	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, manifestPath), encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := store.File{
+		ID: "file_toc", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 5, SHA256: "digest", Status: "processed",
+		SourcePath:   filepath.ToSlash(filepath.Join(relativeDir, "source.txt")),
+		ManifestPath: sql.NullString{String: filepath.ToSlash(manifestPath), Valid: true},
+		CreatedAt:    now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start deletion and wait until the deletion marker is registered so that
+	// the race window (store lookup succeeded, lease not yet acquired) is
+	// deterministically covered.
+	deleted := make(chan bool, 1)
+	go func() {
+		ok, err := service.Delete(context.Background(), record.ID, "tenant-a")
+		if err != nil {
+			t.Errorf("Delete() error = %v", err)
+			deleted <- false
+			return
+		}
+		deleted <- ok
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		service.lifecycleMu.Lock()
+		_, deleting := service.deleting[record.ID]
+		service.lifecycleMu.Unlock()
+		if deleting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("deletion marker was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Resolve must fail with file_not_found because the file is being deleted.
+	_, _, _, resolveErr := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
+	var gatewayError *apierror.Error
+	if !errors.As(resolveErr, &gatewayError) || gatewayError.Status != 404 || gatewayError.Code != "file_not_found" {
+		t.Fatalf("error = %v, want 404 file_not_found", resolveErr)
+	}
+
+	select {
+	case ok := <-deleted:
+		if !ok {
+			t.Fatal("Delete() reported no file deleted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Delete() did not complete")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, relativeDir)); !os.IsNotExist(err) {
+		t.Fatalf("file directory still exists after delete: %v", err)
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
+	}
+}
+
+// TestDeleteAndJanitorRace verifies that an explicit DELETE and the janitor
+// running concurrently on the same file do not deadlock, do not panic, and
+// leave no artifacts or database record behind. The janitor must not take
+// over cleanup of a record that DELETE already marked, and DELETE must still
+// report success. The race timing is controlled deterministically: a lease
+// held by a reader makes DELETE block after marking the record, giving the
+// janitor a chance to observe the marked record.
+func TestDeleteAndJanitorRace(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	relativeDir := filepath.Join("files", "tenant-a", "file_race")
+	manifestPath := filepath.Join(relativeDir, "manifest.json")
+	manifest := converter.Manifest{
+		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+	}
+	encoded, _ := json.Marshal(manifest)
+	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, manifestPath), encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := store.File{
+		ID: "file_race", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 5, SHA256: "digest", Status: "processed",
+		SourcePath:   filepath.ToSlash(filepath.Join(relativeDir, "source.txt")),
+		ManifestPath: sql.NullString{String: filepath.ToSlash(manifestPath), Valid: true},
+		CreatedAt:    now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold a lease so that DELETE blocks at waitForLease after marking the
+	// record, creating a deterministic window for the janitor to observe it.
+	release, err := service.acquireLease(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleted := make(chan bool, 1)
+	go func() {
+		ok, err := service.Delete(context.Background(), record.ID, "tenant-a")
+		if err != nil {
+			t.Errorf("Delete() error = %v", err)
+			deleted <- false
+			return
+		}
+		deleted <- ok
+	}()
+
+	// Wait until DELETE has marked the record (deleted_at is set) and is
+	// blocked on the lease.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		current, err := dataStore.GetInternal(context.Background(), record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current != nil && current.DeletedAt.Valid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("DELETE did not mark the record")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The janitor now observes the marked record. It must not take over
+	// cleanup: MarkDeleted returns false and the janitor skips the record.
+	service.deleteExpired(context.Background())
+
+	// DELETE must still be blocked on the lease.
+	select {
+	case <-deleted:
+		t.Fatal("Delete() completed while a lease was held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case ok := <-deleted:
+		if !ok {
+			t.Fatal("Delete() reported no file deleted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Delete() did not complete after lease release")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, relativeDir)); !os.IsNotExist(err) {
+		t.Fatalf("file directory still exists after concurrent delete: %v", err)
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
 	}
 }
 

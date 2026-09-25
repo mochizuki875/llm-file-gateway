@@ -20,6 +20,10 @@ type resolvedDocument struct {
 	filename   string
 	derivedDir string
 	manifest   converter.Manifest
+	// release is called when the caller is done reading the artifacts. It is
+	// nil for inline documents, whose temporary directory is cleaned up by
+	// the request handler.
+	release func()
 }
 
 // prepareDocument resolves a file reference (file_id, file_data, or file_url)
@@ -36,11 +40,11 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 		return resolvedDocument{}, apierror.New(400, "invalid_file_reference", "Specify exactly one file source.", param)
 	}
 	if id, ok := reference["file_id"].(string); ok && id != "" {
-		record, manifest, err := server.files.Resolve(ctx, id, tenantID, param+".file_id")
+		record, manifest, release, err := server.files.Resolve(ctx, id, tenantID, param+".file_id")
 		if err != nil {
 			return resolvedDocument{}, err
 		}
-		return resolvedDocument{record.Filename, filepath.Join(server.settings.DataDir, filepath.Dir(record.SourcePath), "derived"), manifest}, nil
+		return resolvedDocument{filename: record.Filename, derivedDir: filepath.Join(server.settings.DataDir, filepath.Dir(record.SourcePath), "derived"), manifest: manifest, release: release}, nil
 	}
 	filename, _ := reference["filename"].(string)
 	var content []byte
@@ -65,10 +69,10 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 			filename = override
 		}
 	}
-	if int64(len(content)) > server.settings.MaxFileBytes {
+	if server.settings.MaxFileBytes > 0 && int64(len(content)) > server.settings.MaxFileBytes {
 		return resolvedDocument{}, apierror.FileTooLarge(server.settings.MaxFileBytes, param)
 	}
-	directory, err := os.MkdirTemp(filepath.Join(server.settings.DataDir, "work"), "gateway-request-")
+	directory, err := createRequestDirectory(filepath.Join(server.settings.DataDir, "work"))
 	if err != nil {
 		return resolvedDocument{}, err
 	}
@@ -100,7 +104,19 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 		}
 		return resolvedDocument{}, apierror.New(400, "file_processing_failed", err.Error(), param)
 	}
-	return resolvedDocument{filepath.Base(filename), filepath.Join(directory, "derived"), result.Manifest}, nil
+	return resolvedDocument{filename: filepath.Base(filename), derivedDir: filepath.Join(directory, "derived"), manifest: result.Manifest}, nil
+}
+
+func createRequestDirectory(workDir string) (string, error) {
+	directory, err := os.MkdirTemp(workDir, "gateway-request-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		_ = os.RemoveAll(directory)
+		return "", err
+	}
+	return directory, nil
 }
 
 // documentParts converts a resolved document into the content parts expected
@@ -148,7 +164,7 @@ func (server *Server) documentParts(document resolvedDocument, kind string) ([]a
 				parts = append(parts, map[string]any{"type": textType, "text": label})
 			}
 		}
-		if artifact.ImagePath == nil || images >= server.settings.MaxDocumentImages {
+		if artifact.ImagePath == nil || (server.settings.MaxDocumentPages > 0 && images >= server.settings.MaxDocumentPages) {
 			continue
 		}
 		image, err := os.ReadFile(filepath.Join(document.derivedDir, *artifact.ImagePath))

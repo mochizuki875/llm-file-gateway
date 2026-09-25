@@ -17,7 +17,7 @@ func imageSize(source string) (image.Config, string, error) {
 	if err != nil {
 		return image.Config{}, "", err
 	}
-	defer input.Close()
+	defer func() { _ = input.Close() }()
 	return image.DecodeConfig(input)
 }
 
@@ -27,7 +27,7 @@ func hashFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer input.Close()
+	defer func() { _ = input.Close() }()
 	digest := sha256.New()
 	if _, err := io.Copy(digest, input); err != nil {
 		return "", err
@@ -41,8 +41,8 @@ func copyFile(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	defer input.Close()
-	output, err := os.Create(destination)
+	defer func() { _ = input.Close() }()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -54,8 +54,11 @@ func copyFile(source, destination string) error {
 }
 
 // validateTextLimit returns a TextLimitError when the combined rune count of
-// all text blocks exceeds limit.
+// all text blocks exceeds limit. A limit of 0 means unlimited.
 func validateTextLimit(textBlocks []string, limit int) error {
+	if limit <= 0 {
+		return nil
+	}
 	textCharacters := 0
 	for _, text := range textBlocks {
 		textCharacters += len([]rune(text))
@@ -72,7 +75,7 @@ func withOutputDirectory(outputDir string, convert func() (Result, error)) (resu
 	if err := removeConversionOutput(outputDir); err != nil {
 		return Result{}, err
 	}
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return Result{}, err
 	}
 	succeeded := false
@@ -85,8 +88,29 @@ func withOutputDirectory(outputDir string, convert func() (Result, error)) (resu
 	if err != nil {
 		return Result{}, err
 	}
+	if err := secureOutputPermissions(outputDir); err != nil {
+		return Result{}, err
+	}
 	succeeded = true
 	return result, nil
+}
+
+// secureOutputPermissions normalizes files created by external converters so
+// document content remains accessible only to the gateway process owner.
+func secureOutputPermissions(outputDir string) error {
+	return filepath.WalkDir(outputDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		mode := os.FileMode(0o600)
+		if entry.IsDir() {
+			mode = 0o700
+		}
+		return os.Chmod(path, mode)
+	})
 }
 
 // removeConversionOutput deletes the output directory and any stale manifest
@@ -121,7 +145,7 @@ func writeResult(source, outputDir, mediaType, textPath string, artifacts []Arti
 		return Result{}, err
 	}
 	encoded = append(encoded, '\n')
-	if err := os.WriteFile(filepath.Join(filepath.Dir(outputDir), "manifest.json"), encoded, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(filepath.Dir(outputDir), "manifest.json"), encoded, 0o600); err != nil {
 		return Result{}, err
 	}
 	return Result{Manifest: manifest, Artifacts: artifacts, Warnings: warnings}, nil

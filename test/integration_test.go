@@ -33,7 +33,7 @@ func startGateway(t *testing.T, upstreamURL string) (*httptest.Server, config.Co
 	}
 	settings := config.Config{
 		DataDir: dataDir, FileTTL: 5 * time.Minute, MaxFileBytes: 50 * 1024 * 1024,
-		MaxDocumentPages: 20, MaxDocumentImages: 8, MaxDocumentTextChars: 500_000, Workers: 2,
+		MaxDocumentPages: 20, MaxDocumentTextChars: 500_000, Workers: 2,
 		VLLMAPIKey: "upstream-key", VLLMModel: "test-model",
 	}
 	settings.VLLMBaseURL, _ = url.Parse(upstreamURL + "/v1")
@@ -80,6 +80,9 @@ func uploadFile(t *testing.T, gatewayURL, filename string, content []byte) strin
 	if _, err := file.Write(content); err != nil {
 		t.Fatal(err)
 	}
+	if err := form.WriteField("purpose", "user_data"); err != nil {
+		t.Fatal(err)
+	}
 	if err := form.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +95,7 @@ func uploadFile(t *testing.T, gatewayURL, filename string, content []byte) strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("upload status = %d: %s", response.StatusCode, body)
@@ -146,7 +149,7 @@ func sendResponses(t *testing.T, gatewayURL string, payload map[string]any) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("responses status = %d: %s", response.StatusCode, body)

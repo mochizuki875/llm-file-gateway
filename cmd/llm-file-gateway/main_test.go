@@ -108,13 +108,54 @@ func TestRunRejectsInvalidDataDir(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleRequestDirectories(t *testing.T) {
+	workDir := t.TempDir()
+	stale := filepath.Join(workDir, "gateway-request-old")
+	unrelated := filepath.Join(workDir, "do-not-delete")
+	target := filepath.Join(workDir, "symlink-target")
+	for _, directory := range []string{stale, unrelated, target} {
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(workDir, "gateway-request-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "gateway-request-file"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cleanupStaleRequestDirectories(workDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale directory still exists: %v", err)
+	}
+	for _, path := range []string{unrelated, target, link, filepath.Join(workDir, "gateway-request-file")} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("unrelated path %q was removed: %v", path, err)
+		}
+	}
+}
+
+func TestComposePropagatesMaxRequestBodyBytesWithoutFixedDefault(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), `MAX_REQUEST_BODY_BYTES: "${MAX_REQUEST_BODY_BYTES:-}"`) {
+		t.Fatalf("compose.yaml does not preserve MAX_REQUEST_BODY_BYTES empty/default semantics")
+	}
+}
+
 func clearGatewayEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"VLLM_MODEL", "VLLM_BASE_URL", "VLLM_API_KEY", "GATEWAY_API_KEY",
 		"GATEWAY_AUTH_REQUIRED", "GATEWAY_HOST", "GATEWAY_PORT",
-		"FILE_TTL_SECONDS", "MAX_FILE_BYTES", "MAX_DOCUMENT_PAGES",
-		"MAX_DOCUMENT_IMAGES", "MAX_DOCUMENT_TEXT_CHARS",
+		"FILE_TTL_SECONDS", "MAX_FILE_BYTES", "MAX_REQUEST_BODY_BYTES", "MAX_DOCUMENT_PAGES",
+		"MAX_DOCUMENT_TEXT_CHARS",
 		"DOCUMENT_TEXT_EXTRACTION_ENABLED", "CONVERSION_WORKERS",
 		"REQUEST_TIMEOUT_SECONDS", "LOGLEVEL", "GATEWAY_DATA_DIR",
 	} {

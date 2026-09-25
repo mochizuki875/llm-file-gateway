@@ -21,7 +21,8 @@ func TestStoreScopesFilesByTenantAndLifetime(t *testing.T) {
 
 	active := testFile("file_active", "tenant-a", now.Unix(), now.Add(time.Hour).Unix())
 	expired := testFile("file_expired", "tenant-a", now.Add(-2*time.Hour).Unix(), now.Add(-time.Hour).Unix())
-	for _, file := range []File{active, expired} {
+	neverExpires := testFile("file_never", "tenant-a", now.Unix(), 0)
+	for _, file := range []File{active, expired, neverExpires} {
 		if err := store.Add(context.Background(), file); err != nil {
 			t.Fatal(err)
 		}
@@ -33,12 +34,23 @@ func TestStoreScopesFilesByTenantAndLifetime(t *testing.T) {
 	if file, err := store.Get(context.Background(), expired.ID, "tenant-a"); err != nil || file != nil {
 		t.Fatalf("expired get = %#v, %v; want nil, nil", file, err)
 	}
+	// A file with expires_at = 0 never expires.
+	if file, err := store.Get(context.Background(), neverExpires.ID, "tenant-a"); err != nil || file == nil || file.ID != neverExpires.ID {
+		t.Fatalf("never-expiring get = %#v, %v; want the file", file, err)
+	}
 	files, err := store.List(context.Background(), "tenant-a", "", 20, "desc", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].ID != active.ID {
-		t.Fatalf("listed files = %#v, want active file", files)
+	if len(files) != 2 {
+		t.Fatalf("listed files = %#v, want active and never-expiring files", files)
+	}
+	ids := map[string]bool{}
+	for _, file := range files {
+		ids[file.ID] = true
+	}
+	if !ids[active.ID] || !ids[neverExpires.ID] {
+		t.Fatalf("listed files = %#v, want %s and %s", files, active.ID, neverExpires.ID)
 	}
 
 	deleted, err := store.Delete(context.Background(), active.ID, "tenant-a")
@@ -61,6 +73,31 @@ func TestStoreScopesFilesByTenantAndLifetime(t *testing.T) {
 	}
 	if file, err := store.GetInternal(context.Background(), expired.ID); err != nil || file != nil {
 		t.Fatalf("expired internal get = %#v, %v; want nil, nil", file, err)
+	}
+}
+
+func TestNeverExpiringFileIsNotExpired(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Unix(2_000_000_000, 0)
+	store.now = func() time.Time { return now }
+	file := testFile("file_never", "tenant-a", now.Unix(), 0)
+	if err := store.Add(context.Background(), file); err != nil {
+		t.Fatal(err)
+	}
+
+	// The janitor must never pick up a never-expiring file.
+	expired, err := store.Expired(context.Background())
+	if err != nil || len(expired) != 0 {
+		t.Fatalf("expired = %#v, %v; want empty", expired, err)
+	}
+	// Pending must still include it.
+	ids, err := store.Pending(context.Background())
+	if err != nil || len(ids) != 1 || ids[0] != file.ID {
+		t.Fatalf("pending = %v, %v; want %s", ids, err, file.ID)
 	}
 }
 

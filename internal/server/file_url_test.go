@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -51,6 +52,12 @@ type recordingDialer struct {
 	addresses []string
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
 func (dialer *recordingDialer) DialContext(_ context.Context, network, address string) (net.Conn, error) {
 	dialer.mu.Lock()
 	dialer.addresses = append(dialer.addresses, address)
@@ -77,6 +84,36 @@ func TestIsPublicIP(t *testing.T) {
 		{name: "unspecified_ipv6", ip: "::", want: false},
 		{name: "multicast_ipv4", ip: "224.0.0.1", want: false},
 		{name: "multicast_ipv6", ip: "ff02::1", want: false},
+		{name: "shared_address_space", ip: "100.64.0.1", want: false},
+		{name: "shared_address_space_upper", ip: "100.127.255.255", want: false},
+		{name: "benchmark_network", ip: "198.18.0.1", want: false},
+		{name: "benchmark_network_upper", ip: "198.19.255.255", want: false},
+		{name: "ietf_protocol_assignments", ip: "192.0.0.1", want: false},
+		{name: "test_net_1", ip: "192.0.2.1", want: false},
+		{name: "six_a_four_relay_anycast", ip: "192.88.99.2", want: false},
+		{name: "test_net_2", ip: "198.51.100.1", want: false},
+		{name: "test_net_3", ip: "203.0.113.1", want: false},
+		{name: "reserved_240", ip: "240.0.0.1", want: false},
+		{name: "broadcast", ip: "255.255.255.255", want: false},
+		{name: "ipv4_mapped_shared", ip: "::ffff:100.64.0.1", want: false},
+		{name: "ipv4_mapped_benchmark", ip: "::ffff:198.18.0.1", want: false},
+		{name: "ipv4_mapped_public", ip: "::ffff:8.8.8.8", want: true},
+		{name: "this_network_ipv4", ip: "0.0.0.1", want: false},
+		{name: "nat64_well_known", ip: "64:ff9b::a9fe:a9fe", want: false},
+		{name: "nat64_well_known_metadata", ip: "64:ff9b::7f00:1", want: false},
+		{name: "nat64_local_use", ip: "64:ff9b:1::a9fe:a9fe", want: false},
+		{name: "ipv4_compatible", ip: "::8.8.8.8", want: false},
+		{name: "discard_only", ip: "100::1", want: false},
+		{name: "dummy_ipv6", ip: "100:0:0:1::1", want: false},
+		{name: "teredo", ip: "2001::1", want: false},
+		{name: "benchmark_ipv6", ip: "2001:2::1", want: false},
+		{name: "documentation_ipv6", ip: "2001:db8::1", want: false},
+		{name: "orchid", ip: "2001:10::1", want: false},
+		{name: "six_to_four", ip: "2002:0808:0808::1", want: false},
+		{name: "documentation_ipv6_2", ip: "3fff::1", want: false},
+		{name: "segment_routing_sids", ip: "5f00::1", want: false},
+		{name: "public_ipv6_after_2001", ip: "2001:4860:4860::8888", want: true},
+		{name: "public_ipv6_after_2002", ip: "2400:cb00:2048:1::c629:d7a2", want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ip := net.ParseIP(test.ip)
@@ -216,6 +253,7 @@ func TestDownloadPublicHTTPSRedirectsRevalidated(t *testing.T) {
 			return nil, errors.New("unexpected dial")
 		},
 	}
+	server.fileDownloadClient = fileDownloadClientForTest(server.fileDialer)
 
 	_, _, err := server.downloadPublicHTTPS(context.Background(), "https://"+firstHost+"/file.txt", "input[0].file_url")
 	var gatewayError *apierror.Error
@@ -237,12 +275,135 @@ func TestDownloadPublicHTTPSKeepsHostAndTLSName(t *testing.T) {
 			return nil, errors.New("dial not allowed in test")
 		},
 	}
+	server.fileDownloadClient = fileDownloadClientForTest(server.fileDialer)
 	_, _, err := server.downloadPublicHTTPS(context.Background(), "https://example.com/file.txt", "input[0].file_url")
 	if err == nil {
 		t.Fatal("downloadPublicHTTPS() succeeded despite dial failure")
 	}
 	if dialedHost != "8.8.8.8" {
 		t.Fatalf("dialed host = %q, want the validated IP 8.8.8.8", dialedHost)
+	}
+}
+
+// redirectChainServer builds a server whose resolver maps every host in the
+// chain to the local test server, and whose dialer routes the pinned public
+// IP to the test server. The chain server returns a redirect to the next host
+// for every request until the final host serves the file content.
+func redirectChainServer(t *testing.T, hosts []string, finalContent string) (*Server, *httptest.Server) {
+	t.Helper()
+	chain := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		host := request.Host
+		index := -1
+		for i, candidate := range hosts {
+			if candidate == host {
+				index = i
+				break
+			}
+		}
+		if index < 0 || index == len(hosts)-1 {
+			response.WriteHeader(http.StatusOK)
+			_, _ = response.Write([]byte(finalContent))
+			return
+		}
+		response.Header().Set("Location", "https://"+hosts[index+1]+"/file.txt")
+		response.WriteHeader(http.StatusFound)
+	}))
+	chainURL, _ := url.Parse(chain.URL)
+	chainHost := chainURL.Hostname()
+	chainPort := chainURL.Port()
+
+	addresses := make(map[string][]net.IPAddr, len(hosts))
+	for _, host := range hosts {
+		addresses[host] = []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}
+	}
+	server := &Server{settings: configForFileURLTest()}
+	server.resolver = &hostResolver{hosts: addresses}
+	server.fileDialer = &publicDialer{
+		resolver: server.resolver,
+		dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, _, _ := net.SplitHostPort(address)
+			if host == "8.8.8.8" {
+				return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(chainHost, chainPort))
+			}
+			return nil, errors.New("unexpected dial")
+		},
+	}
+	server.fileDownloadClient = fileDownloadClientForTest(server.fileDialer)
+	// Trust the test server's self-signed certificate so the HTTPS client
+	// accepts the connection.
+	server.fileDownloadClient.Transport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	return server, chain
+}
+
+func TestDownloadPublicHTTPSAllowsFourRedirects(t *testing.T) {
+	hosts := []string{"a.example.com", "b.example.com", "c.example.com", "d.example.com", "e.example.com"}
+	server, chain := redirectChainServer(t, hosts, "final content")
+	defer chain.Close()
+
+	content, filename, err := server.downloadPublicHTTPS(context.Background(), "https://"+hosts[0]+"/file.txt", "input[0].file_url")
+	if err != nil {
+		t.Fatalf("downloadPublicHTTPS() error = %v", err)
+	}
+	if string(content) != "final content" {
+		t.Fatalf("content = %q, want %q", content, "final content")
+	}
+	if filename != "file.txt" {
+		t.Fatalf("filename = %q, want file.txt", filename)
+	}
+}
+
+func TestDownloadPublicHTTPSRejectsFifthRedirect(t *testing.T) {
+	hosts := []string{"a.example.com", "b.example.com", "c.example.com", "d.example.com", "e.example.com", "f.example.com"}
+	server, chain := redirectChainServer(t, hosts, "final content")
+	defer chain.Close()
+
+	_, _, err := server.downloadPublicHTTPS(context.Background(), "https://"+hosts[0]+"/file.txt", "input[0].file_url")
+	var gatewayError *apierror.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Code != "invalid_file_url" || !strings.Contains(gatewayError.Message, "Too many redirects") {
+		t.Fatalf("downloadPublicHTTPS() error = %v, want Too many redirects", err)
+	}
+}
+
+func TestDownloadPublicHTTPSRejectsMalformedRedirectLocation(t *testing.T) {
+	server := &Server{
+		settings: configForFileURLTest(),
+		resolver: fakeResolver{addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}},
+	}
+	server.fileDownloadClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{"https://%"}},
+			Body:       http.NoBody,
+			Request:    request,
+		}, nil
+	})}
+	server.fileDownloadClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+
+	_, _, err := server.downloadPublicHTTPS(context.Background(), "https://example.com/file.txt", "input[0].file_url")
+	var gatewayError *apierror.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Code != "invalid_file_url" || !strings.Contains(gatewayError.Message, "Redirect location is invalid") {
+		t.Fatalf("downloadPublicHTTPS() error = %v, want invalid redirect location", err)
+	}
+}
+
+func TestDownloadPublicHTTPSUnlimitedSize(t *testing.T) {
+	// With MaxFileBytes = 0 the download is not size-limited, so content
+	// larger than the default test limit is accepted.
+	hosts := []string{"a.example.com"}
+	content := strings.Repeat("x", 4096)
+	server, chain := redirectChainServer(t, hosts, content)
+	defer chain.Close()
+	server.settings.MaxFileBytes = 0
+
+	downloaded, filename, err := server.downloadPublicHTTPS(context.Background(), "https://"+hosts[0]+"/file.txt", "input[0].file_url")
+	if err != nil {
+		t.Fatalf("downloadPublicHTTPS() error = %v", err)
+	}
+	if string(downloaded) != content {
+		t.Fatalf("content length = %d, want %d", len(downloaded), len(content))
+	}
+	if filename != "file.txt" {
+		t.Fatalf("filename = %q, want file.txt", filename)
 	}
 }
 
@@ -257,6 +418,20 @@ func (resolver *hostResolver) LookupIPAddr(_ context.Context, host string) ([]ne
 		return nil, errors.New("unknown host")
 	}
 	return addresses, nil
+}
+
+// fileDownloadClientForTest builds the shared file download client the same
+// way NewHandler does, so tests can exercise downloadPublicHTTPS without
+// constructing the full server.
+func fileDownloadClientForTest(dialer *publicDialer) *http.Client {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: dialer.DialContext,
+		},
+	}
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	return client
 }
 
 func configForFileURLTest() config.Config {

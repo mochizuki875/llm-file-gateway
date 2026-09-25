@@ -38,8 +38,5 @@ func IsRetryable(err error) bool {
 		return false
 	}
 	var validationError *extractor.ValidationError
-	if errors.As(err, &validationError) {
-		return false
-	}
-	return true
+	return !errors.As(err, &validationError)
 }

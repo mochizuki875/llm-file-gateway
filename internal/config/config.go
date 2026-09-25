@@ -25,8 +25,8 @@ type Config struct {
 	DataDir               string
 	FileTTL               time.Duration
 	MaxFileBytes          int64
+	MaxRequestBodyBytes   int64
 	MaxDocumentPages      int
-	MaxDocumentImages     int
 	MaxDocumentTextChars  int
 	DocumentDPI           int
 	TextExtractionEnabled bool
@@ -59,25 +59,29 @@ func Load() (Config, error) {
 	}
 
 	fileTTLSeconds, err := envInt64("FILE_TTL_SECONDS", int64(defaultFileTTL/time.Second))
-	if err != nil || fileTTLSeconds < 1 {
-		return Config{}, fmt.Errorf("FILE_TTL_SECONDS must be a positive integer")
+	if err != nil || fileTTLSeconds < 0 {
+		return Config{}, fmt.Errorf("FILE_TTL_SECONDS must be a non-negative integer")
 	}
 
 	maxFileBytes, err := envInt64("MAX_FILE_BYTES", 50*1024*1024)
-	if err != nil || maxFileBytes < 1 {
-		return Config{}, fmt.Errorf("MAX_FILE_BYTES must be a positive integer")
+	if err != nil || maxFileBytes < 0 {
+		return Config{}, fmt.Errorf("MAX_FILE_BYTES must be a non-negative integer")
+	}
+	// The default request body limit is 4x the per-file limit so that a
+	// request can carry several inline files (each within MAX_FILE_BYTES)
+	// plus their base64 expansion and JSON overhead. A limit of 0 means
+	// unlimited.
+	maxRequestBodyBytes, err := envInt64("MAX_REQUEST_BODY_BYTES", 4*maxFileBytes)
+	if err != nil || maxRequestBodyBytes < 0 {
+		return Config{}, fmt.Errorf("MAX_REQUEST_BODY_BYTES must be a non-negative integer")
 	}
 	maxPages, err := envInt("MAX_DOCUMENT_PAGES", 50)
-	if err != nil || maxPages < 1 {
-		return Config{}, fmt.Errorf("MAX_DOCUMENT_PAGES must be a positive integer")
-	}
-	maxImages, err := envInt("MAX_DOCUMENT_IMAGES", 8)
-	if err != nil || maxImages < 1 {
-		return Config{}, fmt.Errorf("MAX_DOCUMENT_IMAGES must be a positive integer")
+	if err != nil || maxPages < 0 {
+		return Config{}, fmt.Errorf("MAX_DOCUMENT_PAGES must be a non-negative integer")
 	}
 	maxTextChars, err := envInt("MAX_DOCUMENT_TEXT_CHARS", 500_000)
-	if err != nil || maxTextChars < 1 {
-		return Config{}, fmt.Errorf("MAX_DOCUMENT_TEXT_CHARS must be a positive integer")
+	if err != nil || maxTextChars < 0 {
+		return Config{}, fmt.Errorf("MAX_DOCUMENT_TEXT_CHARS must be a non-negative integer")
 	}
 	documentDPI, err := envInt("DOCUMENT_DPI", 300)
 	if err != nil || documentDPI < 1 || documentDPI > 1200 {
@@ -92,8 +96,8 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("CONVERSION_WORKERS must be a positive integer")
 	}
 	timeoutSeconds, err := envFloat("REQUEST_TIMEOUT_SECONDS", 300)
-	if err != nil || timeoutSeconds <= 0 {
-		return Config{}, fmt.Errorf("REQUEST_TIMEOUT_SECONDS must be positive")
+	if err != nil || timeoutSeconds < 0 {
+		return Config{}, fmt.Errorf("REQUEST_TIMEOUT_SECONDS must be non-negative")
 	}
 	logVerbosity, err := envInt("LOGLEVEL", 0)
 	if err != nil || logVerbosity < 0 || logVerbosity > 2 {
@@ -110,8 +114,8 @@ func Load() (Config, error) {
 		DataDir:               envString("GATEWAY_DATA_DIR", "gateway-data"),
 		FileTTL:               time.Duration(fileTTLSeconds) * time.Second,
 		MaxFileBytes:          maxFileBytes,
+		MaxRequestBodyBytes:   maxRequestBodyBytes,
 		MaxDocumentPages:      maxPages,
-		MaxDocumentImages:     maxImages,
 		MaxDocumentTextChars:  maxTextChars,
 		DocumentDPI:           documentDPI,
 		TextExtractionEnabled: textExtractionEnabled,

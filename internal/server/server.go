@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +31,10 @@ type Server struct {
 	resolver ipResolver
 	// fileDialer pins file URL connections to validated public IPs.
 	fileDialer *publicDialer
+	// fileDownloadClient is the shared HTTP client used for file URL
+	// downloads. It is created once so that connections are reused across
+	// requests instead of being opened and closed for every download.
+	fileDownloadClient *http.Client
 }
 
 // NewHandler builds the HTTP handler that exposes the health, Files, Responses,
@@ -46,6 +49,13 @@ func NewHandler(settings config.Config, dataStore *store.Store, fileService *fil
 		resolver: server.resolver,
 		dial:     (&net.Dialer{Timeout: settings.RequestTimeout}).DialContext,
 	}
+	server.fileDownloadClient = &http.Client{
+		Timeout: settings.RequestTimeout,
+		Transport: &http.Transport{
+			DialContext: server.fileDialer.DialContext,
+		},
+	}
+	server.fileDownloadClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
 	mux.HandleFunc("POST /v1/files", server.createFile)
@@ -65,6 +75,16 @@ func (server *Server) health(response http.ResponseWriter, _ *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// uploadBodyLimit returns the maximum HTTP request body size for file
+// uploads. It is the per-file limit plus a fixed allowance for multipart
+// overhead; a limit of 0 means unlimited.
+func (server *Server) uploadBodyLimit() int64 {
+	if server.settings.MaxFileBytes <= 0 {
+		return 0
+	}
+	return server.settings.MaxFileBytes + 1<<20
+}
+
 // createFile handles POST /v1/files: it validates the multipart upload and
 // queues the file for asynchronous conversion.
 func (server *Server) createFile(response http.ResponseWriter, request *http.Request) {
@@ -73,16 +93,19 @@ func (server *Server) createFile(response http.ResponseWriter, request *http.Req
 		writeError(response, gatewayError)
 		return
 	}
-	request.Body = http.MaxBytesReader(response, request.Body, server.settings.MaxFileBytes+1<<20)
+	if limit := server.uploadBodyLimit(); limit > 0 {
+		request.Body = http.MaxBytesReader(response, request.Body, limit)
+	}
 	input, header, err := request.FormFile("file")
 	if err != nil {
 		writeError(response, apierror.New(400, "invalid_request", "file is required.", "file"))
 		return
 	}
-	defer input.Close()
+	defer func() { _ = input.Close() }()
 	purpose := request.FormValue("purpose")
 	if purpose == "" {
-		purpose = "user_data"
+		writeError(response, apierror.New(400, "invalid_request", "purpose is required.", "purpose"))
+		return
 	}
 	if !validFilePurpose(purpose) {
 		writeError(response, apierror.New(400, "invalid_request", "Invalid purpose.", "purpose"))
@@ -109,8 +132,13 @@ func (server *Server) createFile(response http.ResponseWriter, request *http.Req
 	}
 	if expiresProvided {
 		maxSeconds := int64(server.settings.FileTTL / time.Second)
-		if expiresAfter.Anchor != "created_at" || expiresAfter.Seconds < 1 || expiresAfter.Seconds > maxSeconds {
-			message := fmt.Sprintf("expires_after must use anchor=created_at and seconds between 1 and %d.", maxSeconds)
+		if expiresAfter.Anchor != "created_at" || expiresAfter.Seconds < 1 || (maxSeconds > 0 && expiresAfter.Seconds > maxSeconds) {
+			message := "expires_after must use anchor=created_at and seconds between 1 and "
+			if maxSeconds > 0 {
+				message += fmt.Sprintf("%d.", maxSeconds)
+			} else {
+				message += "unlimited."
+			}
 			writeError(response, apierror.New(400, "invalid_expires_after", message, "expires_after"))
 			return
 		}
@@ -193,15 +221,25 @@ func (server *Server) retrieveFile(response http.ResponseWriter, request *http.R
 }
 
 // retrieveContent handles GET /v1/files/{file_id}/content and streams the
-// original uploaded file.
+// original uploaded file. It holds a read lease on the file artifacts so that
+// a concurrent DELETE or janitor cleanup waits until the download completes.
 func (server *Server) retrieveContent(response http.ResponseWriter, request *http.Request) {
-	record := server.ownedFile(response, request)
-	if record == nil {
+	tenantID, gatewayError := server.tenantID(request)
+	if gatewayError != nil {
+		writeError(response, gatewayError)
 		return
 	}
+	id := request.PathValue("file_id")
+	record, input, release, err := server.files.OpenSource(request.Context(), id, tenantID)
+	if err != nil {
+		writeAnyError(response, request, err)
+		return
+	}
+	defer release()
+	defer func() { _ = input.Close() }()
 	response.Header().Set("Content-Type", record.MediaType)
 	response.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", record.Filename))
-	http.ServeFile(response, request, filepath.Join(server.settings.DataDir, record.SourcePath))
+	http.ServeContent(response, request, record.Filename, time.Unix(record.CreatedAt, 0), input)
 }
 
 // deleteFile handles DELETE /v1/files/{file_id}.
@@ -268,15 +306,25 @@ func (server *Server) tenantID(request *http.Request) (string, *apierror.Error) 
 // openAIFile converts a store.File into the OpenAI Files API JSON shape.
 func openAIFile(record store.File) map[string]any {
 	status := "uploaded"
-	if record.Status == "processed" {
+	switch record.Status {
+	case "processed":
 		status = "processed"
-	} else if record.Status == "failed" {
+	case "failed":
 		status = "error"
+	}
+	var expiresAt any
+	if record.ExpiresAt > 0 {
+		expiresAt = record.ExpiresAt
+	}
+	var statusDetails any
+	if record.Status == "failed" && record.ErrorMessage.Valid && record.ErrorMessage.String != "" {
+		statusDetails = record.ErrorMessage.String
 	}
 	return map[string]any{
 		"id": record.ID, "object": "file", "bytes": record.Bytes,
-		"created_at": record.CreatedAt, "expires_at": record.ExpiresAt,
+		"created_at": record.CreatedAt, "expires_at": expiresAt,
 		"filename": record.Filename, "purpose": record.Purpose, "status": status,
+		"status_details": statusDetails,
 	}
 }
 

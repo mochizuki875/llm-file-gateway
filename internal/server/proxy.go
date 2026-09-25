@@ -19,8 +19,9 @@ import (
 // to the upstream server.
 var hopByHopHeaders = map[string]bool{
 	"connection": true, "keep-alive": true, "proxy-authenticate": true,
-	"proxy-authorization": true, "te": true, "trailer": true,
-	"transfer-encoding": true, "upgrade": true, "host": true, "content-length": true,
+	"proxy-authorization": true, "proxy-connection": true, "te": true,
+	"trailer": true, "transfer-encoding": true, "upgrade": true,
+	"host": true, "content-length": true,
 }
 
 // upstreamErrorPreviewBytes is the maximum number of upstream error body bytes
@@ -59,15 +60,10 @@ func (server *Server) passthrough(response http.ResponseWriter, request *http.Re
 	upstream, err := server.client.Do(upstreamRequest)
 	if err != nil {
 		slog.Error("upstream request failed", "method", request.Method, "path", request.URL.Path, "error", safeHTTPError(err))
-		var networkError net.Error
-		if errors.As(err, &networkError) && networkError.Timeout() {
-			writeError(response, apierror.New(504, "model_timeout", "The model request timed out.", ""))
-		} else {
-			writeError(response, apierror.New(502, "model_upstream_error", "Unable to reach the model server.", ""))
-		}
+		writeError(response, upstreamError(err))
 		return
 	}
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 	upstreamBody := server.logUpstreamErrorResponse(upstream, "upstream returned error", "method", request.Method, "path", request.URL.Path)
 	copyHeaders(response.Header(), upstream.Header)
 	response.WriteHeader(upstream.StatusCode)
@@ -77,9 +73,22 @@ func (server *Server) passthrough(response http.ResponseWriter, request *http.Re
 }
 
 // copyHeaders copies all non-hop-by-hop headers from source to destination.
+// In addition to the fixed hop-by-hop list, headers named in the Connection
+// header are removed because they are connection-specific for this hop and
+// must not be forwarded to the upstream server.
 func copyHeaders(destination, source http.Header) {
+	connectionHeaders := make(map[string]bool)
+	for _, value := range source.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				connectionHeaders[strings.ToLower(name)] = true
+			}
+		}
+	}
 	for name, values := range source {
-		if hopByHopHeaders[strings.ToLower(name)] {
+		lower := strings.ToLower(name)
+		if hopByHopHeaders[lower] || connectionHeaders[lower] {
 			continue
 		}
 		for _, value := range values {
@@ -96,6 +105,8 @@ func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Re
 
 	upstreamURL := strings.TrimRight(server.settings.VLLMBaseURL.String(), "/") + "/" + endpoint
 	upstreamRequest, _ := http.NewRequestWithContext(request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(content))
+	copyHeaders(upstreamRequest.Header, request.Header)
+	upstreamRequest.Header.Del("Authorization")
 	upstreamRequest.Header.Set("Content-Type", "application/json")
 	if authorization := server.upstreamAuthorization(); authorization != "" {
 		upstreamRequest.Header.Set("Authorization", authorization)
@@ -103,10 +114,10 @@ func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Re
 	upstream, err := server.client.Do(upstreamRequest)
 	if err != nil {
 		slog.Error("upstream inference request failed", "endpoint", endpoint, "error", safeHTTPError(err))
-		writeError(response, apierror.New(502, "model_upstream_error", "Unable to reach the model server.", ""))
+		writeError(response, upstreamError(err))
 		return
 	}
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 	upstreamBody := server.logUpstreamErrorResponse(upstream, "upstream inference returned error", "endpoint", endpoint)
 	copyHeaders(response.Header(), upstream.Header)
 	response.WriteHeader(upstream.StatusCode)
@@ -119,6 +130,18 @@ func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Re
 	if _, err := io.Copy(response, upstreamBody); err != nil {
 		slog.Debug("upstream response copy interrupted", "endpoint", endpoint, "error", err)
 	}
+}
+
+// upstreamError maps an upstream request failure to a gateway error. Timeouts
+// are reported as 504 model_timeout so that clients can distinguish a slow
+// model from an unreachable one; all other failures are 502
+// model_upstream_error.
+func upstreamError(err error) *apierror.Error {
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return apierror.New(504, "model_timeout", "The model request timed out.", "")
+	}
+	return apierror.New(502, "model_upstream_error", "Unable to reach the model server.", "")
 }
 
 // logUpstreamErrorResponse logs a preview of upstream error responses (without

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,6 +45,18 @@ type Service struct {
 	lifecycleMu sync.Mutex
 	conversions map[string]*fileLifecycle
 
+	// leases tracks active read leases on file artifacts so that Delete and
+	// the janitor do not remove the on-disk directory while inference is
+	// reading it. It is guarded by lifecycleMu.
+	leases map[string]*fileLease
+
+	// deleting tracks files whose deletion has started (logically marked
+	// deleted) but whose on-disk artifacts have not been removed yet. The
+	// channel is closed when cleanup finishes. It is guarded by lifecycleMu
+	// and prevents a new reader from acquiring a lease on a file that is
+	// being deleted (TOCTOU between store lookup and lease acquisition).
+	deleting map[string]chan struct{}
+
 	// syncHandler is used for processing a single conversion job.
 	// It is a field to allow injection for testing.
 	syncHandler func(ctx context.Context, job conversionJob) error
@@ -67,6 +80,16 @@ type fileLifecycle struct {
 	cancel context.CancelFunc
 }
 
+// fileLease tracks active readers of a file's artifacts. Delete and the
+// janitor wait for all readers to release the lease before removing the
+// on-disk directory. done is closed when the last reader releases.
+type fileLease struct {
+	mu     sync.Mutex
+	refs   int
+	done   chan struct{}
+	closed bool
+}
+
 // conversionJob is a single unit of work for the conversion workers.
 type conversionJob struct {
 	id                string
@@ -81,7 +104,7 @@ func New(settings config.Config, dataStore *store.Store, dispatcher *converter.D
 	if dispatcher == nil {
 		panic("converter dispatcher must not be nil")
 	}
-	service := &Service{settings: settings, store: dataStore, dispatcher: dispatcher, queue: make(chan conversionJob, 128), retryCount: make(map[string]int), conversions: make(map[string]*fileLifecycle)}
+	service := &Service{settings: settings, store: dataStore, dispatcher: dispatcher, queue: make(chan conversionJob, 128), retryCount: make(map[string]int), conversions: make(map[string]*fileLifecycle), leases: make(map[string]*fileLease), deleting: make(map[string]chan struct{})}
 	service.lifecycleCtx, service.lifecycleCancel = context.WithCancel(context.Background())
 	service.syncHandler = service.convert
 	return service
@@ -142,6 +165,67 @@ func (service *Service) Stop() {
 	slog.Info("file service stopped")
 }
 
+// ReconcileStorage removes file directories left by crashes before their
+// database record was persisted. Directories referenced by any record,
+// including failed or logically deleted records, are retained.
+func (service *Service) ReconcileStorage(ctx context.Context) error {
+	sourcePaths, err := service.store.SourcePaths(ctx)
+	if err != nil {
+		return err
+	}
+	referenced := make(map[string]bool, len(sourcePaths))
+	for _, sourcePath := range sourcePaths {
+		referenced[filepath.Clean(filepath.Dir(sourcePath))] = true
+	}
+	filesDir := filepath.Join(service.settings.DataDir, "files")
+	info, err := os.Lstat(filesDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect files directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("files path must be a directory and not a symlink")
+	}
+	tenants, err := os.ReadDir(filesDir)
+	if err != nil {
+		return fmt.Errorf("read files directory: %w", err)
+	}
+	for _, tenant := range tenants {
+		if tenant.Type()&os.ModeSymlink != 0 || !tenant.IsDir() {
+			continue
+		}
+		tenantDir := filepath.Join(filesDir, tenant.Name())
+		entries, err := os.ReadDir(tenantDir)
+		if err != nil {
+			return fmt.Errorf("read tenant file directory %q: %w", tenant.Name(), err)
+		}
+		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() || !managedFileID(entry.Name()) {
+				continue
+			}
+			relativeDir := filepath.Clean(filepath.Join("files", tenant.Name(), entry.Name()))
+			if referenced[relativeDir] {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(tenantDir, entry.Name())); err != nil {
+				return fmt.Errorf("remove orphan file directory %q: %w", relativeDir, err)
+			}
+			slog.Info("orphan file directory removed", "directory", relativeDir)
+		}
+	}
+	return nil
+}
+
+func managedFileID(name string) bool {
+	if len(name) != len("file_")+32 || !strings.HasPrefix(name, "file_") {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(name, "file_"))
+	return err == nil
+}
+
 // Create stores an uploaded file on disk, records it in the store, and queues
 // it for asynchronous conversion. It returns the created file record.
 func (service *Service) Create(ctx context.Context, filename string, source io.Reader, purpose, tenantID string, ttl time.Duration) (*store.File, error) {
@@ -157,7 +241,7 @@ func (service *Service) Create(ctx context.Context, filename string, source io.R
 	}
 	relativeDir := filepath.Join("files", tenantID, id)
 	fileDir := filepath.Join(service.settings.DataDir, relativeDir)
-	if err := os.MkdirAll(fileDir, 0o755); err != nil {
+	if err := os.MkdirAll(fileDir, 0o700); err != nil {
 		return nil, err
 	}
 	keepFiles := false
@@ -174,7 +258,13 @@ func (service *Service) Create(ctx context.Context, filename string, source io.R
 		return nil, err
 	}
 	digest := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(output, digest), io.LimitReader(source, service.settings.MaxFileBytes+1))
+	var written int64
+	var copyErr error
+	if service.settings.MaxFileBytes > 0 {
+		written, copyErr = io.Copy(io.MultiWriter(output, digest), io.LimitReader(source, service.settings.MaxFileBytes+1))
+	} else {
+		written, copyErr = io.Copy(io.MultiWriter(output, digest), source)
+	}
 	closeErr := output.Close()
 	if copyErr != nil {
 		return nil, copyErr
@@ -182,18 +272,23 @@ func (service *Service) Create(ctx context.Context, filename string, source io.R
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	if written > service.settings.MaxFileBytes {
+	if service.settings.MaxFileBytes > 0 && written > service.settings.MaxFileBytes {
 		return nil, apierror.FileTooLarge(service.settings.MaxFileBytes, "file")
 	}
 	if err := documentConverter.Validate(sourcePath); err != nil {
 		return nil, apierror.New(400, "unsupported_file_type", err.Error(), "file")
 	}
 	now := time.Now().Unix()
+	expiresAt := now + int64(ttl/time.Second)
+	if ttl <= 0 {
+		// A non-positive TTL means the file never expires (expires_at = 0).
+		expiresAt = 0
+	}
 	record := &store.File{
 		ID: id, TenantID: tenantID, Filename: safeName, MediaType: documentConverter.MediaType(),
 		Purpose: purpose, Bytes: written, SHA256: hex.EncodeToString(digest.Sum(nil)),
 		Status: "uploaded", SourcePath: filepath.ToSlash(filepath.Join(relativeDir, "source"+extension)),
-		CreatedAt: now, ExpiresAt: now + int64(ttl/time.Second),
+		CreatedAt: now, ExpiresAt: expiresAt,
 	}
 	if err := service.store.Add(ctx, *record); err != nil {
 		return nil, err
@@ -224,19 +319,24 @@ func (service *Service) Delete(ctx context.Context, id, tenantID string) (bool, 
 		slog.Warn("file not found", "file_id", id, "param", "file_id")
 		return false, nil
 	}
+	deletionDone, claimed := service.beginDeletion(id)
+	if !claimed {
+		return false, nil
+	}
+	defer service.endDeletion(id, deletionDone)
 	marked, err := service.store.MarkDeleted(ctx, id, tenantID)
 	if err != nil {
 		return false, err
 	}
 	if !marked {
-		// Already deleted (or deleted concurrently); nothing left to do.
 		return false, nil
 	}
 	service.waitForConversion(id)
+	service.waitForLease(id)
 	if err := os.RemoveAll(filepath.Dir(filepath.Join(service.settings.DataDir, record.SourcePath))); err != nil {
 		return false, err
 	}
-	deleted, err := service.store.Delete(ctx, id, tenantID)
+	deleted, err := service.store.Delete(context.WithoutCancel(ctx), id, tenantID)
 	if err != nil || !deleted {
 		return deleted, err
 	}
@@ -246,32 +346,151 @@ func (service *Service) Delete(ctx context.Context, id, tenantID string) (bool, 
 
 // Resolve returns the file record and its conversion manifest for inference
 // use. It rejects files that are still processing or that failed to convert.
-func (service *Service) Resolve(ctx context.Context, id, tenantID, param string) (*store.File, converter.Manifest, error) {
+// The returned release function must be called when the caller is done
+// reading the file artifacts; until then Delete and the janitor wait before
+// removing the on-disk directory.
+func (service *Service) Resolve(ctx context.Context, id, tenantID, param string) (*store.File, converter.Manifest, func(), error) {
 	record, err := service.store.Get(ctx, id, tenantID)
 	if err != nil {
-		return nil, converter.Manifest{}, err
+		return nil, converter.Manifest{}, nil, err
 	}
 	if record == nil {
 		slog.Warn("file not found", "file_id", id, "param", param)
-		return nil, converter.Manifest{}, apierror.New(404, "file_not_found", "File not found.", param)
+		return nil, converter.Manifest{}, nil, apierror.New(404, "file_not_found", "File not found.", param)
 	}
 	if record.Status == "uploaded" || record.Status == "processing" {
-		return nil, converter.Manifest{}, apierror.New(409, "file_not_ready", "The file is still being processed.", param)
+		return nil, converter.Manifest{}, nil, apierror.New(409, "file_not_ready", "The file is still being processed.", param)
 	}
 	if record.Status == "failed" || !record.ManifestPath.Valid {
-		return nil, converter.Manifest{}, apierror.New(422, "file_processing_failed", "File processing failed.", param)
+		return nil, converter.Manifest{}, nil, apierror.New(422, "file_processing_failed", "File processing failed.", param)
+	}
+	// Acquire the lease before reading the manifest so that a concurrent
+	// Delete or janitor cleanup cannot remove the artifacts between the
+	// store lookup and the manifest read (TOCTOU).
+	release, err := service.acquireLease(id)
+	if err != nil {
+		slog.Warn("file is being deleted", "file_id", id, "param", param)
+		return nil, converter.Manifest{}, nil, apierror.New(404, "file_not_found", "File not found.", param)
 	}
 	content, err := os.ReadFile(filepath.Join(service.settings.DataDir, record.ManifestPath.String))
 	if err != nil {
+		release()
 		slog.Error("file manifest read failed", "file_id", id, "error", err)
-		return nil, converter.Manifest{}, apierror.New(422, "file_processing_failed", "File manifest is missing.", param)
+		return nil, converter.Manifest{}, nil, apierror.New(422, "file_processing_failed", "File manifest is missing.", param)
 	}
 	var manifest converter.Manifest
 	if err := json.Unmarshal(content, &manifest); err != nil {
+		release()
 		slog.Error("file manifest decode failed", "file_id", id, "error", err)
-		return nil, converter.Manifest{}, err
+		return nil, converter.Manifest{}, nil, err
 	}
-	return record, manifest, nil
+	return record, manifest, release, nil
+}
+
+// OpenSource opens the original uploaded file for reading while holding a
+// read lease, so that Delete and the janitor wait until the caller is done
+// before removing the on-disk directory. The caller must close the returned
+// file and call the release function exactly once.
+func (service *Service) OpenSource(ctx context.Context, id, tenantID string) (*store.File, *os.File, func(), error) {
+	record, err := service.store.Get(ctx, id, tenantID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if record == nil {
+		return nil, nil, nil, apierror.New(404, "file_not_found", "File not found.", "file_id")
+	}
+	release, err := service.acquireLease(id)
+	if err != nil {
+		return nil, nil, nil, apierror.New(404, "file_not_found", "File not found.", "file_id")
+	}
+	input, err := os.Open(filepath.Join(service.settings.DataDir, record.SourcePath))
+	if err != nil {
+		release()
+		return nil, nil, nil, err
+	}
+	return record, input, release, nil
+}
+
+// acquireLease registers a read lease on the given file's artifacts. It
+// returns a release function that must be called exactly once. It fails when
+// deletion of the file has already started so that a reader cannot start
+// reading artifacts that are about to be removed.
+func (service *Service) acquireLease(id string) (func(), error) {
+	service.lifecycleMu.Lock()
+	defer service.lifecycleMu.Unlock()
+	if _, deleting := service.deleting[id]; deleting {
+		return nil, errors.New("file is being deleted")
+	}
+	lease, ok := service.leases[id]
+	if !ok {
+		lease = &fileLease{done: make(chan struct{})}
+		service.leases[id] = lease
+	}
+	lease.mu.Lock()
+	lease.refs++
+	lease.mu.Unlock()
+	return func() {
+		service.releaseLease(id, lease)
+	}, nil
+}
+
+// releaseLease decrements the reference count of a lease and closes its done
+// channel when the last reader releases it.
+func (service *Service) releaseLease(id string, lease *fileLease) {
+	service.lifecycleMu.Lock()
+	lease.mu.Lock()
+	lease.refs--
+	if lease.refs == 0 && !lease.closed {
+		lease.closed = true
+		close(lease.done)
+		delete(service.leases, id)
+	}
+	lease.mu.Unlock()
+	service.lifecycleMu.Unlock()
+}
+
+// waitForLease waits until all readers of the given file have released their
+// leases. It returns immediately when no reader holds a lease.
+func (service *Service) waitForLease(id string) {
+	service.lifecycleMu.Lock()
+	lease, ok := service.leases[id]
+	service.lifecycleMu.Unlock()
+	if !ok {
+		return
+	}
+	lease.mu.Lock()
+	if lease.refs == 0 {
+		lease.mu.Unlock()
+		return
+	}
+	done := lease.done
+	lease.mu.Unlock()
+	<-done
+}
+
+// beginDeletion claims cleanup ownership for the given file and prevents new
+// readers from acquiring a lease. A false return means another cleanup owns
+// the file in this process.
+func (service *Service) beginDeletion(id string) (chan struct{}, bool) {
+	service.lifecycleMu.Lock()
+	defer service.lifecycleMu.Unlock()
+	if _, deleting := service.deleting[id]; deleting {
+		return nil, false
+	}
+	done := make(chan struct{})
+	service.deleting[id] = done
+	return done, true
+}
+
+// endDeletion removes the deletion marker for the given file and signals any
+// waiter that deletion has finished.
+func (service *Service) endDeletion(id string, done chan struct{}) {
+	service.lifecycleMu.Lock()
+	if current, ok := service.deleting[id]; ok && current == done {
+		delete(service.deleting, id)
+	}
+	service.lifecycleMu.Unlock()
+	close(done)
 }
 
 // enqueue submits a conversion job to the worker queue, or drops it when the
@@ -518,19 +737,31 @@ func (service *Service) deleteExpired(ctx context.Context) {
 		return
 	}
 	for _, record := range expired {
-		// Mark the record as logically deleted first so that a conversion
-		// that is about to start (or is running) cannot resurrect the file,
-		// then wait for any in-flight conversion before removing artifacts.
-		if _, err := service.store.MarkDeleted(ctx, record.ID, record.TenantID); err != nil {
-			slog.Warn("expired file mark failed", "file_id", record.ID, "error", err)
+		deletionDone, claimed := service.beginDeletion(record.ID)
+		if !claimed {
 			continue
 		}
+		if !record.DeletedAt.Valid {
+			marked, err := service.store.MarkDeleted(ctx, record.ID, record.TenantID)
+			if err != nil {
+				service.endDeletion(record.ID, deletionDone)
+				slog.Warn("expired file mark failed", "file_id", record.ID, "error", err)
+				continue
+			}
+			if !marked {
+				service.endDeletion(record.ID, deletionDone)
+				continue
+			}
+		}
 		service.waitForConversion(record.ID)
+		service.waitForLease(record.ID)
 		if err := os.RemoveAll(filepath.Dir(filepath.Join(service.settings.DataDir, record.SourcePath))); err != nil {
+			service.endDeletion(record.ID, deletionDone)
 			slog.Warn("expired file cleanup failed", "file_id", record.ID, "error", err)
 			continue
 		}
-		deleted, err := service.store.Delete(ctx, record.ID, record.TenantID)
+		deleted, err := service.store.Delete(context.WithoutCancel(ctx), record.ID, record.TenantID)
+		service.endDeletion(record.ID, deletionDone)
 		if err != nil {
 			slog.Warn("expired file deletion failed", "file_id", record.ID, "error", err)
 			continue

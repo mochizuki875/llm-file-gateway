@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,21 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/store"
 )
 
+type blockingHeaderWriter struct {
+	*httptest.ResponseRecorder
+	reached chan struct{}
+	proceed chan struct{}
+	once    sync.Once
+}
+
+func (writer *blockingHeaderWriter) Header() http.Header {
+	writer.once.Do(func() {
+		close(writer.reached)
+		<-writer.proceed
+	})
+	return writer.ResponseRecorder.Header()
+}
+
 func TestHealth(t *testing.T) {
 	settings, dataStore, service := testDependencies(t)
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -38,6 +54,20 @@ func TestHealth(t *testing.T) {
 	}
 	if got, want := response.Body.String(), "{\"status\":\"ok\"}\n"; got != want {
 		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+func TestRequestDirectoryUsesOwnerOnlyPermissions(t *testing.T) {
+	directory, err := createRequestDirectory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("request directory mode = %04o, want 0700", got)
 	}
 }
 
@@ -231,6 +261,67 @@ func TestCreateFileExpiration(t *testing.T) {
 	}
 }
 
+func TestCreateFileUnlimitedTTL(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.FileTTL = 0
+	handler := NewHandler(settings, dataStore, service)
+
+	body := &bytes.Buffer{}
+	form := multipart.NewWriter(body)
+	file, err := form.CreateFormFile("file", "notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(file, "never expires")
+	_ = form.WriteField("purpose", "user_data")
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created["expires_at"] != nil {
+		t.Fatalf("expires_at = %#v, want null (never expires)", created["expires_at"])
+	}
+
+	// With an unlimited TTL, expires_after accepts any positive seconds.
+	body = &bytes.Buffer{}
+	form = multipart.NewWriter(body)
+	file, err = form.CreateFormFile("file", "notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(file, "custom expiry")
+	_ = form.WriteField("purpose", "user_data")
+	_ = form.WriteField("expires_after[anchor]", "created_at")
+	_ = form.WriteField("expires_after[seconds]", "999999")
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	lifetime := int64(created["expires_at"].(float64) - created["created_at"].(float64))
+	if lifetime != 999999 {
+		t.Fatalf("file lifetime = %d seconds, want 999999", lifetime)
+	}
+}
+
 func TestMissingFileLogsWarning(t *testing.T) {
 	settings, dataStore, service := testDependencies(t)
 	handler := NewHandler(settings, dataStore, service)
@@ -319,7 +410,7 @@ func TestResponsesExpandsInlineUnknownTextFormat(t *testing.T) {
 	baseURL, _ := url.Parse(upstream.URL + "/v1")
 	settings.VLLMBaseURL = baseURL
 	settings.VLLMModel = "test-model"
-	settings.MaxDocumentImages = 8
+	settings.MaxDocumentPages = 8
 	handler := NewHandler(settings, dataStore, service)
 	payload := map[string]any{
 		"model":                "test-model",
@@ -355,6 +446,106 @@ func TestResponsesExpandsInlineUnknownTextFormat(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(settings.DataDir, "work"))
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("temporary entries = %v, %v", entries, err)
+	}
+}
+
+func TestInferenceForwardsSafeRequestHeaders(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		payload  map[string]any
+	}{
+		{
+			name: "responses", endpoint: "/v1/responses",
+			payload: map[string]any{"model": "test-model", "input": []any{map[string]any{
+				"role": "user", "content": []any{map[string]any{
+					"type": "input_file", "filename": "notes.txt",
+					"file_data": base64.StdEncoding.EncodeToString([]byte("secret")),
+				}},
+			}}},
+		},
+		{
+			name: "chat", endpoint: "/v1/chat/completions",
+			payload: map[string]any{"model": "test-model", "messages": []any{map[string]any{
+				"role": "user", "content": []any{map[string]any{
+					"type": "file", "file": map[string]any{
+						"filename": "notes.txt", "file_data": base64.StdEncoding.EncodeToString([]byte("secret")),
+					},
+				}},
+			}}},
+		},
+		{name: "responses_without_file", endpoint: "/v1/responses", payload: map[string]any{"model": "test-model", "input": "hello"}},
+		{name: "chat_without_file", endpoint: "/v1/chat/completions", payload: map[string]any{"model": "test-model", "messages": []any{map[string]any{"role": "user", "content": "hello"}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var receivedHeader http.Header
+			var receivedHost string
+			var receivedLength int64
+			var receivedBody []byte
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				receivedHeader = request.Header.Clone()
+				receivedHost = request.Host
+				receivedLength = request.ContentLength
+				receivedBody, _ = io.ReadAll(request.Body)
+				writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+			}))
+			defer upstream.Close()
+
+			settings, dataStore, service := testDependencies(t)
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			settings.VLLMModel = "test-model"
+			handler := NewHandler(settings, dataStore, service)
+			body, _ := json.Marshal(test.payload)
+			request := httptest.NewRequest(http.MethodPost, test.endpoint, bytes.NewReader(body))
+			request.Host = "client.example"
+			request.ContentLength = 1
+			request.Header.Set("Content-Length", "1")
+			request.Header.Set("Content-Type", "text/plain")
+			request.Header.Set("Authorization", "Bearer client-key")
+			request.Header.Set("X-Request-ID", "request-123")
+			request.Header.Set("X-Correlation-ID", "correlation-456")
+			request.Header.Set("Traceparent", "00-trace-parent")
+			request.Header.Set("Tracestate", "vendor=value")
+			request.Header.Set("Baggage", "key=value")
+			request.Header.Set("X-Custom-Metadata", "custom")
+			request.Header.Set("Connection", "X-Custom-Hop")
+			request.Header.Set("X-Custom-Hop", "remove")
+			request.Header.Set("Proxy-Connection", "keep-alive")
+			request.Header.Set("Keep-Alive", "timeout=5")
+			request.Header.Set("TE", "trailers")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+			for name, want := range map[string]string{
+				"X-Request-ID": "request-123", "X-Correlation-ID": "correlation-456",
+				"Traceparent": "00-trace-parent", "Tracestate": "vendor=value",
+				"Baggage": "key=value", "X-Custom-Metadata": "custom",
+			} {
+				if got := receivedHeader.Get(name); got != want {
+					t.Errorf("upstream %s = %q, want %q", name, got, want)
+				}
+			}
+			if got := receivedHeader.Get("Authorization"); got != "Bearer upstream-key" {
+				t.Errorf("upstream Authorization = %q", got)
+			}
+			for _, name := range []string{"Connection", "Proxy-Connection", "Keep-Alive", "TE", "X-Custom-Hop"} {
+				if got := receivedHeader.Get(name); got != "" {
+					t.Errorf("upstream %s = %q, want empty", name, got)
+				}
+			}
+			upstreamURL, _ := url.Parse(upstream.URL)
+			if receivedHost != upstreamURL.Host {
+				t.Errorf("upstream Host = %q, want %q", receivedHost, upstreamURL.Host)
+			}
+			if got := receivedHeader.Get("Content-Type"); got != "application/json" {
+				t.Errorf("upstream Content-Type = %q", got)
+			}
+			if receivedLength != int64(len(receivedBody)) || receivedLength == 1 {
+				t.Errorf("upstream Content-Length = %d, body length = %d", receivedLength, len(receivedBody))
+			}
+		})
 	}
 }
 
@@ -442,7 +633,7 @@ func TestInferenceStreamsUpstreamEvents(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			if response.StatusCode != http.StatusOK {
 				body, _ := io.ReadAll(response.Body)
 				t.Fatalf("status = %d: %s", response.StatusCode, body)
@@ -602,6 +793,7 @@ func TestInlineFileDataOversizedBodyRejected(t *testing.T) {
 	settings, dataStore, service := testDependencies(t)
 	settings.VLLMModel = "test-model"
 	settings.MaxFileBytes = 4 << 20
+	settings.MaxRequestBodyBytes = int64((settings.MaxFileBytes+2)/3)*4 + 1<<20
 	handler := NewHandler(settings, dataStore, service)
 
 	content := strings.Repeat("a", int(settings.MaxFileBytes)*2)
@@ -632,6 +824,150 @@ func TestInlineFileDataOversizedBodyRejected(t *testing.T) {
 	}
 	if result.Error.Code != "invalid_request" {
 		t.Fatalf("error code = %q, want invalid_request", result.Error.Code)
+	}
+}
+
+func TestInlineFileDataUnlimitedBodyAccepted(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	// Both limits unlimited: the request body must not be capped.
+	settings.MaxFileBytes = 0
+	settings.MaxRequestBodyBytes = 0
+	settings.MaxDocumentTextChars = 10 << 20
+	handler := NewHandler(settings, dataStore, service)
+
+	content := strings.Repeat("a", 1<<20)
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_file", "filename": "notes.txt",
+				"file_data": base64.StdEncoding.EncodeToString([]byte(content)),
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestUnlimitedRequestBodyKeepsPerFileLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	settings.MaxFileBytes = 16
+	settings.MaxRequestBodyBytes = 0
+	handler := NewHandler(settings, dataStore, service)
+
+	largeBody, _ := json.Marshal(map[string]any{
+		"model": "test-model", "input": "hello",
+		"metadata": map[string]any{"padding": strings.Repeat("x", 2<<20)},
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(largeBody))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unlimited body status = %d: %s", response.Code, response.Body.String())
+	}
+
+	fileBody, _ := json.Marshal(map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{"role": "user", "content": []any{map[string]any{
+			"type": "input_file", "filename": "notes.txt",
+			"file_data": base64.StdEncoding.EncodeToString([]byte("seventeen bytes!!")),
+		}}}},
+	})
+	request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(fileBody))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "file_too_large") {
+		t.Fatalf("per-file limit response = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestInferencePreservesLargeJSONIntegers(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		body     string
+	}{
+		{name: "responses", endpoint: "/v1/responses", body: `{"model":"test-model","input":"hello","seed":9007199254740993,"metadata":{"values":[9007199254740995]}}`},
+		{name: "chat", endpoint: "/v1/chat/completions", body: `{"model":"test-model","messages":[{"role":"user","content":"hello"}],"seed":9007199254740993,"metadata":{"values":[9007199254740995]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var received string
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				content, _ := io.ReadAll(request.Body)
+				received = string(content)
+				writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+			}))
+			defer upstream.Close()
+			settings, dataStore, service := testDependencies(t)
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			settings.VLLMModel = "test-model"
+			handler := NewHandler(settings, dataStore, service)
+
+			request := httptest.NewRequest(http.MethodPost, test.endpoint, strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+			for _, number := range []string{"9007199254740993", "9007199254740995"} {
+				if !strings.Contains(received, number) {
+					t.Fatalf("upstream payload = %s, missing %s", received, number)
+				}
+			}
+		})
+	}
+}
+
+func TestInferenceRequiresSingleJSONDocument(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{name: "trailing_whitespace", body: "{\"model\":\"test-model\",\"input\":\"hello\"}\n\t", wantStatus: http.StatusOK},
+		{name: "second_object", body: `{"model":"test-model","input":"hello"} {}`, wantStatus: http.StatusBadRequest},
+		{name: "second_number", body: `{"model":"test-model","input":"hello"} 123`, wantStatus: http.StatusBadRequest},
+		{name: "trailing_garbage", body: `{"model":"test-model","input":"hello"} garbage`, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+			}))
+			defer upstream.Close()
+			settings, dataStore, service := testDependencies(t)
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			settings.VLLMModel = "test-model"
+			handler := NewHandler(settings, dataStore, service)
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d: %s, want %d", response.Code, response.Body.String(), test.wantStatus)
+			}
+		})
 	}
 }
 
@@ -673,6 +1009,7 @@ func TestInlineFileDataMultiFileTotalLimit(t *testing.T) {
 	settings, dataStore, service := testDependencies(t)
 	settings.VLLMModel = "test-model"
 	settings.MaxFileBytes = 4 << 20
+	settings.MaxRequestBodyBytes = int64((settings.MaxFileBytes+2)/3)*4 + 1<<20
 	handler := NewHandler(settings, dataStore, service)
 
 	content := strings.Repeat("a", int(settings.MaxFileBytes))
@@ -706,6 +1043,89 @@ func TestInlineFileDataMultiFileTotalLimit(t *testing.T) {
 	}
 }
 
+// TestInlineFileDataAggregateLimit verifies that MAX_REQUEST_BODY_BYTES is
+// enforced as an aggregate limit: multiple inline files that are each within
+// MAX_FILE_BYTES are rejected when their combined base64-encoded body exceeds
+// the configured aggregate limit.
+func TestInlineFileDataAggregateLimit(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMModel = "test-model"
+	settings.MaxFileBytes = 4 << 20
+	// Aggregate limit allows one file plus overhead but not two.
+	settings.MaxRequestBodyBytes = int64((4<<20+2)/3)*4 + 1<<20
+	handler := NewHandler(settings, dataStore, service)
+
+	content := strings.Repeat("a", int(settings.MaxFileBytes))
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_file", "filename": "a.txt", "file_data": base64.StdEncoding.EncodeToString([]byte(content))},
+				map[string]any{"type": "input_file", "filename": "b.txt", "file_data": base64.StdEncoding.EncodeToString([]byte(content))},
+			},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "invalid_request" {
+		t.Fatalf("error code = %q, want invalid_request", result.Error.Code)
+	}
+}
+
+// TestInlineFileDataWithinAggregateLimitAccepted verifies that a single file
+// within MAX_FILE_BYTES is accepted when MAX_REQUEST_BODY_BYTES is set to a
+// value that accommodates its base64 expansion.
+func TestInlineFileDataWithinAggregateLimitAccepted(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	settings.MaxFileBytes = 4 << 20
+	settings.MaxDocumentTextChars = 10 << 20
+	settings.MaxRequestBodyBytes = int64((4<<20+2)/3)*4 + 1<<20
+	handler := NewHandler(settings, dataStore, service)
+
+	content := strings.Repeat("a", int(settings.MaxFileBytes))
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_file", "filename": "notes.txt",
+				"file_data": base64.StdEncoding.EncodeToString([]byte(content)),
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestDocumentPartsReportsMissingArtifact(t *testing.T) {
 	settings, _, _ := testDependencies(t)
 	server := &Server{settings: settings}
@@ -725,7 +1145,7 @@ func TestDocumentPartsReportsMissingArtifact(t *testing.T) {
 
 func TestDocumentPartsEmitsDocumentTextBeforeImages(t *testing.T) {
 	settings, _, _ := testDependencies(t)
-	settings.MaxDocumentImages = 1
+	settings.MaxDocumentPages = 1
 	server := &Server{settings: settings}
 	derivedDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(derivedDir, "document.txt"), []byte("complete document text"), 0o644); err != nil {
@@ -765,7 +1185,7 @@ func TestDocumentPartsEmitsDocumentTextBeforeImages(t *testing.T) {
 
 func TestDocumentPartsOmitsEmptyText(t *testing.T) {
 	settings, _, _ := testDependencies(t)
-	settings.MaxDocumentImages = 1
+	settings.MaxDocumentPages = 1
 	server := &Server{settings: settings}
 	derivedDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(derivedDir, "page.txt"), nil, 0o644); err != nil {
@@ -789,6 +1209,39 @@ func TestDocumentPartsOmitsEmptyText(t *testing.T) {
 	}
 	if len(parts) != 1 || parts[0].(map[string]any)["type"] != "input_image" {
 		t.Fatalf("parts = %#v, want one input_image", parts)
+	}
+}
+
+func TestDocumentPartsUnlimitedPagesEmitsAllImages(t *testing.T) {
+	settings, _, _ := testDependencies(t)
+	settings.MaxDocumentPages = 0
+	server := &Server{settings: settings}
+	derivedDir := t.TempDir()
+	imagePath := "page.png"
+	if err := os.WriteFile(filepath.Join(derivedDir, imagePath), []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	document := resolvedDocument{
+		filename:   "document.pdf",
+		derivedDir: derivedDir,
+		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{Parts: []converter.Artifact{
+			{PartNumber: 1, ImagePath: &imagePath},
+			{PartNumber: 2, ImagePath: &imagePath},
+			{PartNumber: 3, ImagePath: &imagePath},
+		}}}},
+	}
+
+	parts, err := server.documentParts(document, "responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want 3 (unlimited)", len(parts))
+	}
+	for _, part := range parts {
+		if part.(map[string]any)["type"] != "input_image" {
+			t.Fatalf("part = %#v, want input_image", part)
+		}
 	}
 }
 
@@ -834,11 +1287,141 @@ func TestPassthroughPreservesRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestPassthroughRemovesConnectionListedHeaders(t *testing.T) {
+	var receivedHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		receivedHeaders = request.Header.Clone()
+		writeJSON(response, http.StatusOK, map[string]any{"object": "passthrough"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	handler := NewHandler(settings, dataStore, service)
+	request := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{"input":"hello"}`))
+	request.Header.Set("Connection", "X-Test-Hop, keep-alive")
+	request.Header.Set("X-Test-Hop", "secret-value")
+	request.Header.Set("X-Keep", "forwarded")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	if receivedHeaders.Get("X-Test-Hop") != "" {
+		t.Fatalf("upstream received Connection-listed header X-Test-Hop = %q", receivedHeaders.Get("X-Test-Hop"))
+	}
+	if receivedHeaders.Get("Connection") != "" {
+		t.Fatalf("upstream received Connection header = %q", receivedHeaders.Get("Connection"))
+	}
+	if receivedHeaders.Get("X-Keep") != "forwarded" {
+		t.Fatalf("upstream X-Keep = %q, want forwarded", receivedHeaders.Get("X-Keep"))
+	}
+}
+
+// TestPassthroughRemovesProxyConnectionHeader verifies that the hop-by-hop
+// Proxy-Connection header is stripped before the request is forwarded to the
+// upstream server.
+func TestPassthroughRemovesProxyConnectionHeader(t *testing.T) {
+	var receivedHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		receivedHeaders = request.Header.Clone()
+		writeJSON(response, http.StatusOK, map[string]any{"object": "passthrough"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	handler := NewHandler(settings, dataStore, service)
+	request := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{"input":"hello"}`))
+	request.Header.Set("Proxy-Connection", "keep-alive")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	if receivedHeaders.Get("Proxy-Connection") != "" {
+		t.Fatalf("upstream received Proxy-Connection header = %q", receivedHeaders.Get("Proxy-Connection"))
+	}
+}
+
 func TestSafeHTTPErrorOmitsURL(t *testing.T) {
 	underlying := errors.New("connection refused")
 	err := &url.Error{Op: "Get", URL: "https://example.com/file?token=secret", Err: underlying}
 	if got := safeHTTPError(err); !errors.Is(got, underlying) || strings.Contains(got.Error(), "secret") {
 		t.Fatalf("safeHTTPError() = %q, want underlying error without URL", got)
+	}
+}
+
+func TestUpstreamTimeoutReturnsModelTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		payload  string
+	}{
+		{name: "responses", endpoint: "/v1/responses", payload: `{"model":"test-model","input":"hello"}`},
+		{name: "chat_completions", endpoint: "/v1/chat/completions", payload: `{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`},
+		{name: "passthrough", endpoint: "/v1/embeddings", payload: `{"input":"hello"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// A server that never responds causes the client to time out.
+			// The handler sleeps longer than the client timeout so that the
+			// request always times out, but still returns so that the test
+			// server can be closed.
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				time.Sleep(500 * time.Millisecond)
+			}))
+			defer upstream.Close()
+			settings, dataStore, service := testDependencies(t)
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			settings.VLLMModel = "test-model"
+			settings.RequestTimeout = 50 * time.Millisecond
+			handler := NewHandler(settings, dataStore, service)
+
+			request := httptest.NewRequest(http.MethodPost, test.endpoint, strings.NewReader(test.payload))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusGatewayTimeout {
+				t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusGatewayTimeout, response.Body.String())
+			}
+			var result struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Error.Code != "model_timeout" {
+				t.Fatalf("error code = %q, want model_timeout", result.Error.Code)
+			}
+		})
+	}
+}
+
+func TestUpstreamUnreachableReturnsModelUpstreamError(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse("http://127.0.0.1:1/v1")
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusBadGateway, response.Body.String())
+	}
+	var result struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "model_upstream_error" {
+		t.Fatalf("error code = %q, want model_upstream_error", result.Error.Code)
 	}
 }
 
@@ -926,6 +1509,7 @@ func TestRetrieveContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = io.WriteString(file, "content payload 123")
+	_ = form.WriteField("purpose", "user_data")
 	if err := form.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -956,6 +1540,89 @@ func TestRetrieveContent(t *testing.T) {
 	}
 	if got := response.Body.String(); got != "content payload 123" {
 		t.Fatalf("content = %q", got)
+	}
+}
+
+// TestRetrieveContentSurvivesConcurrentDelete verifies the HTTP handler keeps
+// the metadata snapshot acquired with its content lease after DELETE marks the
+// record as deleted.
+func TestRetrieveContentSurvivesConcurrentDelete(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	handler := NewHandler(settings, dataStore, service)
+	body := &bytes.Buffer{}
+	form := multipart.NewWriter(body)
+	file, err := form.CreateFormFile("file", "notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(file, "content payload 123")
+	_ = form.WriteField("purpose", "user_data")
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("create status = %d: %s", response.Code, response.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created["id"].(string)
+
+	writer := &blockingHeaderWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		reached:          make(chan struct{}),
+		proceed:          make(chan struct{}),
+	}
+	downloadDone := make(chan struct{})
+	go func() {
+		defer close(downloadDone)
+		request := httptest.NewRequest(http.MethodGet, "/v1/files/"+id+"/content", nil)
+		handler.ServeHTTP(writer, request)
+	}()
+	<-writer.reached
+
+	deleted := make(chan bool, 1)
+	go func() {
+		ok, err := service.Delete(context.Background(), id, store.SharedTenantID)
+		if err != nil {
+			t.Errorf("Delete() error = %v", err)
+			deleted <- false
+			return
+		}
+		deleted <- ok
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		record, err := dataStore.GetInternal(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record != nil && record.DeletedAt.Valid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("DELETE did not mark the record")
+		}
+	}
+	close(writer.proceed)
+	<-downloadDone
+	if writer.Code != http.StatusOK || writer.Body.String() != "content payload 123" {
+		t.Fatalf("download response = %d %q", writer.Code, writer.Body.String())
+	}
+
+	select {
+	case ok := <-deleted:
+		if !ok {
+			t.Fatal("Delete() reported no file deleted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Delete() did not complete after content release")
 	}
 }
 
@@ -1355,6 +2022,151 @@ func TestChatWithFilePreservesExistingSystemMessage(t *testing.T) {
 	original := messages[1].(map[string]any)
 	if original["role"] != "system" || original["content"] != "You are helpful." {
 		t.Fatalf("original system message = %#v", original)
+	}
+}
+
+func TestOpenAIFileStatusDetails(t *testing.T) {
+	base := store.File{
+		ID: "file_1", Bytes: 123, CreatedAt: 1000, ExpiresAt: 2000,
+		Filename: "notes.txt", Purpose: "user_data",
+	}
+	for _, test := range []struct {
+		name        string
+		status      string
+		errorMsg    string
+		wantStatus  string
+		wantDetails any
+	}{
+		{name: "uploaded", status: "uploaded", wantStatus: "uploaded"},
+		{name: "processing", status: "processing", wantStatus: "uploaded"},
+		{name: "processed", status: "processed", wantStatus: "processed"},
+		{name: "failed_with_message", status: "failed", errorMsg: "document exceeds the 50-page limit", wantStatus: "error", wantDetails: "document exceeds the 50-page limit"},
+		{name: "failed_without_message", status: "failed", wantStatus: "error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record := base
+			record.Status = test.status
+			if test.errorMsg != "" {
+				record.ErrorMessage = sql.NullString{String: test.errorMsg, Valid: true}
+			}
+			file := openAIFile(record)
+			if file["status"] != test.wantStatus {
+				t.Fatalf("status = %v, want %v", file["status"], test.wantStatus)
+			}
+			if details := file["status_details"]; details != test.wantDetails {
+				t.Fatalf("status_details = %#v, want %#v", details, test.wantDetails)
+			}
+			if expiresAt := file["expires_at"]; expiresAt != int64(2000) {
+				t.Fatalf("expires_at = %#v, want 2000", expiresAt)
+			}
+		})
+	}
+	withoutExpiry := base
+	withoutExpiry.Status = "processed"
+	withoutExpiry.ExpiresAt = 0
+	if expiresAt := openAIFile(withoutExpiry)["expires_at"]; expiresAt != nil {
+		t.Fatalf("expires_at = %#v, want nil", expiresAt)
+	}
+}
+
+func TestFileObjectNullFieldsMatchAcrossEndpoints(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.FileTTL = 0
+	handler := NewHandler(settings, dataStore, service)
+	body := &bytes.Buffer{}
+	form := multipart.NewWriter(body)
+	file, err := form.CreateFormFile("file", "notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(file, "content")
+	_ = form.WriteField("purpose", "user_data")
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("create response = %d: %s", response.Code, response.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created["id"].(string)
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/files/"+id, nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var retrieved map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &retrieved); err != nil {
+		t.Fatal(err)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/files", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var listed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Data) != 1 {
+		t.Fatalf("listed files = %d, want 1", len(listed.Data))
+	}
+	for endpoint, fileObject := range map[string]map[string]any{"create": created, "retrieve": retrieved, "list": listed.Data[0]} {
+		if fileObject["expires_at"] != nil || fileObject["status_details"] != nil {
+			t.Fatalf("%s FileObject = %#v, want null expires_at/status_details", endpoint, fileObject)
+		}
+	}
+}
+
+func TestCreateFileRequiresPurposeWithoutSideEffects(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		writePurpose bool
+	}{
+		{name: "missing"},
+		{name: "empty", writePurpose: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			settings, dataStore, service := testDependencies(t)
+			handler := NewHandler(settings, dataStore, service)
+			body := &bytes.Buffer{}
+			form := multipart.NewWriter(body)
+			file, err := form.CreateFormFile("file", "notes.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(file, "secret")
+			if test.writePurpose {
+				_ = form.WriteField("purpose", "")
+			}
+			if err := form.Close(); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+			request.Header.Set("Content-Type", form.FormDataContentType())
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"param":"purpose"`) {
+				t.Fatalf("response = %d %s", response.Code, response.Body.String())
+			}
+			paths, err := dataStore.SourcePaths(context.Background())
+			if err != nil || len(paths) != 0 {
+				t.Fatalf("persisted paths = %v, %v; want none", paths, err)
+			}
+			entries, err := os.ReadDir(filepath.Join(settings.DataDir, "files"))
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("file entries = %v, want none", entries)
+			}
+		})
 	}
 }
 

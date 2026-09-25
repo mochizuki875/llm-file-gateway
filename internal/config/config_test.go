@@ -43,6 +43,94 @@ func TestLoadGatewayListenAddress(t *testing.T) {
 	}
 }
 
+func TestLoadMaxDocumentPages(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "default", want: 50},
+		{name: "custom", value: "99", want: 99},
+		{name: "unlimited", value: "0", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MAX_DOCUMENT_PAGES", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.MaxDocumentPages != test.want {
+				t.Fatalf("MaxDocumentPages = %d, want %d", settings.MaxDocumentPages, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"-1", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("MAX_DOCUMENT_PAGES", value)
+			if _, err := Load(); err == nil || err.Error() != "MAX_DOCUMENT_PAGES must be a non-negative integer" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadMaxRequestBodyBytes(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  int64
+	}{
+		{name: "default_four_times_file", want: 4 * 50 * 1024 * 1024},
+		{name: "custom", value: "104857600", want: 104857600},
+		{name: "unlimited", value: "0", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MAX_REQUEST_BODY_BYTES", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.MaxRequestBodyBytes != test.want {
+				t.Fatalf("MaxRequestBodyBytes = %d, want %d", settings.MaxRequestBodyBytes, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"-1", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("MAX_REQUEST_BODY_BYTES", value)
+			if _, err := Load(); err == nil || err.Error() != "MAX_REQUEST_BODY_BYTES must be a non-negative integer" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadMaxRequestBodyBytesUsesConfiguredFileLimitByDefault(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+	t.Setenv("MAX_FILE_BYTES", "104857600")
+	t.Setenv("MAX_REQUEST_BODY_BYTES", "")
+
+	settings, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.MaxRequestBodyBytes != 4*104857600 {
+		t.Fatalf("MaxRequestBodyBytes = %d, want %d", settings.MaxRequestBodyBytes, 4*104857600)
+	}
+}
+
 func TestLoadDocumentTextExtraction(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
@@ -178,10 +266,129 @@ func TestLoadFileTTL(t *testing.T) {
 		}
 	})
 
-	for _, value := range []string{"0", "invalid"} {
+	t.Run("unlimited", func(t *testing.T) {
+		t.Setenv("FILE_TTL_SECONDS", "0")
+		settings, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settings.FileTTL != 0 {
+			t.Fatalf("FileTTL = %s, want 0 (unlimited)", settings.FileTTL)
+		}
+	})
+
+	for _, value := range []string{"-1", "invalid"} {
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Setenv("FILE_TTL_SECONDS", value)
-			if _, err := Load(); err == nil || err.Error() != "FILE_TTL_SECONDS must be a positive integer" {
+			if _, err := Load(); err == nil || err.Error() != "FILE_TTL_SECONDS must be a non-negative integer" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadMaxFileBytes(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  int64
+	}{
+		{name: "default", want: 50 * 1024 * 1024},
+		{name: "custom", value: "1048576", want: 1048576},
+		{name: "unlimited", value: "0", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MAX_FILE_BYTES", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.MaxFileBytes != test.want {
+				t.Fatalf("MaxFileBytes = %d, want %d", settings.MaxFileBytes, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"-1", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("MAX_FILE_BYTES", value)
+			if _, err := Load(); err == nil || err.Error() != "MAX_FILE_BYTES must be a non-negative integer" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadMaxDocumentTextChars(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "default", want: 500_000},
+		{name: "custom", value: "1000", want: 1000},
+		{name: "unlimited", value: "0", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MAX_DOCUMENT_TEXT_CHARS", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.MaxDocumentTextChars != test.want {
+				t.Fatalf("MaxDocumentTextChars = %d, want %d", settings.MaxDocumentTextChars, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"-1", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("MAX_DOCUMENT_TEXT_CHARS", value)
+			if _, err := Load(); err == nil || err.Error() != "MAX_DOCUMENT_TEXT_CHARS must be a non-negative integer" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadRequestTimeout(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "default", want: 300 * time.Second},
+		{name: "custom", value: "60", want: 60 * time.Second},
+		{name: "unlimited", value: "0", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("REQUEST_TIMEOUT_SECONDS", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.RequestTimeout != test.want {
+				t.Fatalf("RequestTimeout = %s, want %s", settings.RequestTimeout, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"-1", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("REQUEST_TIMEOUT_SECONDS", value)
+			if _, err := Load(); err == nil || err.Error() != "REQUEST_TIMEOUT_SECONDS must be non-negative" {
 				t.Fatalf("Load() error = %v", err)
 			}
 		})

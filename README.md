@@ -93,23 +93,26 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | `GATEWAY_API_KEY` | Conditional | - | Gateway用APIキー |
 | `VLLM_API_KEY` | Yes | - | vLLM用APIキー |
 | `GATEWAY_DATA_DIR` | No | `gateway-data` | SQLiteとファイルの保存先 |
-| `FILE_TTL_SECONDS` | No | `300` | デフォルトのファイル保持期間(sec)および`expires_after.seconds`で指定可能な上限値 |
-| `MAX_FILE_BYTES` | No | `52428800`(50 MiB) | 1ファイルの最大サイズ(bytes) |
-| `MAX_DOCUMENT_PAGES` | No | `50` | 画像変換する最大ページ数 |
-| `MAX_DOCUMENT_IMAGES` | No | `8` | 1ファイルからvLLMへ送る最大画像数 |
-| `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | 1ファイルから抽出するテキストの最大文字数（PDF、Officeを含む） |
+| `FILE_TTL_SECONDS` | No | `300` | デフォルトのファイル保持期間(sec)および`expires_after.seconds`で指定可能な上限値（`0`で無制限） |
+| `MAX_FILE_BYTES` | No | `52428800`(50 MiB) | 1ファイルの最大サイズ(bytes)（`0`で無制限） |
+| `MAX_REQUEST_BODY_BYTES` | No | `MAX_FILE_BYTES`の4倍 | 推論リクエスト(`/v1/responses`、`/v1/chat/completions`)のボディ全体の最大サイズ(bytes)。複数の`file_data`を含む場合の合計上限（`0`で無制限） |
+| `MAX_DOCUMENT_PAGES` | No | `50` | Gatewayで受け付けるPDF/Officeの最大ページ数（`0`で無制限） |
+| `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | 1ファイルから抽出するテキストの最大文字数（`0`で無制限） |
 | `DOCUMENT_DPI` | No | `300` | PDF/Officeを画像へ変換する際の解像度(DPI)。1〜1200の整数 |
 | `DOCUMENT_TEXT_EXTRACTION_ENABLED` | No | `true` | PDFとOfficeからテキストを抽出するか |
 | `CONVERSION_WORKERS` | No | `2` | 並行してファイルを変換するworker数。正の整数で変更可能 |
-| `REQUEST_TIMEOUT_SECONDS` | No | `300` | vLLM通信のtimeout。streamingではstream全体に適用 |
+| `REQUEST_TIMEOUT_SECONDS` | No | `300` | vLLM通信のtimeout。streamingではstream全体に適用（`0`で無制限） |
 | `LOGLEVEL` | No | `0` | ログverbosity（`0`: 通常、`1`: DEBUG、`2`: 高頻度の詳細ログ） |
 
 - `GATEWAY_AUTH_REQUIRED=true`を設定した場合はGatewayでの認証が有効となり、`GATEWAY_API_KEY`の設定が必須となります。
 - GatewayからvLLMへの認証は`VLLM_API_KEY`を用いて行われるため、Gatewayに送信された`OPENAI_API_KEY`は転送されません。(`VLLM_API_KEY`は常に必須です。)
 - `GET /health`は認証対象外です。
-- PDF/Officeの最大ページ数は`MAX_DOCUMENT_PAGES`、vLLMへ送る画像数はファイルごとに`MAX_DOCUMENT_IMAGES`で制限します。`DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合、画像上限を超えた分の内容も抽出テキストとして送信します。
-- 抽出テキストはPDF、Office、すべてのテキスト形式を含めて`MAX_DOCUMENT_TEXT_CHARS`で制限します。
-- ファイル保持期間(`expires_after.seconds`)の上限は`FILE_TTL_SECONDS`で、未指定の場合は`FILE_TTL_SECONDS`に設定された値が適用されます。
+- Gatewayで受け付けるPDF/Officeの最大ページ数は`MAX_DOCUMENT_PAGES`（`0`で無制限）で制限し、超過した場合はエラーを返します。
+- テキスト抽出時の文字数上限はPDF、Office、すべてのテキスト形式を含めて`MAX_DOCUMENT_TEXT_CHARS`（`0`で無制限）で制限します。
+- `DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合、画像変換に加えてテキスト抽出を行い、両方をバックエンドに送信します。
+- ファイル保持期間(`expires_after.seconds`)の上限は`FILE_TTL_SECONDS`（`0`で無制限）で、未指定の場合は`FILE_TTL_SECONDS`に設定された値が適用されます。
+- `MAX_FILE_BYTES`（`0`で無制限）はアップロード、`file_data`、`file_url`の各ファイルに適用され、`MAX_REQUEST_BODY_BYTES`（`0`で無制限）は推論リクエストのボディ全体に適用されます。
+- `REQUEST_TIMEOUT_SECONDS`（`0`で無制限）はvLLM通信のtimeoutで、streamingではstream全体に適用されます。
 
 ## Running the Gateway
 
@@ -238,6 +241,8 @@ curl --fail --silent -X DELETE "$OPENAI_BASE_URL/files/$FILE_ID" \
 
 一つの参照には`file_id`、`file_data`、`file_url`のいずれか一つだけを指定します。Chat Completionsでは`file_url`を使用できません。
 
+> **Note**: OpenAIのChat Completions APIは`file` inputをサポートしていませんが、LLM File GatewayはChat Completionsでも`file_id`と`file_data`によるファイル参照を拡張として受け付けます。Responses APIと同様に、ファイルは抽出テキストとbase64画像のcontent partへ展開されます。
+
 ## Testing
 
 ```bash
@@ -246,7 +251,7 @@ make verify
 make test-integration
 ```
 
-`make test`は外部rendererを使うケースを除く短縮testです。`make verify`は同じtestをrace detector付きで実行し、続けて`go vet`を実行します。どちらもvLLMをmockするためGPU serverは不要です。
+`make test`は外部rendererを使うケースを除く短縮testです。`make verify`は同じtestをrace detector付きで実行し、続けて`go vet`と`make lint`（golangci-lint。未インストール時は自動でインストール）を実行します。どちらもvLLMをmockするためGPU serverは不要です。
 
 `make test-integration`はPDF/Officeの実変換を含み、LibreOfficeと必要なフォントが必要です。外部vLLMを使うE2E確認には[Python Client Example](#python-client-example)を使用できます。
 
@@ -254,7 +259,7 @@ make test-integration
 
 - 登録済み拡張子の基本signature、テキストのUTF-8とNUL byte、画像形式を検証します。
 - `file_url`はHTTPSの443番ポートと公開IPだけを許可し、redirectごとに再検証します。
-- 保存ファイルは`FILE_TTL_SECONDS`で設定した保持期間経過後に削除します。
+- 保存ファイルは`FILE_TTL_SECONDS`で設定した保持期間経過後に削除します（`0`の場合は削除されません）。
 - Gateway認証無効時の保存領域は全クライアントで共有されます。
 - ファイル由来のテキストを信頼しないようGatewayでsystem instructionを追加します。
 - ログへファイルに記載された本文やAPI keyを明示的には出力しません。

@@ -2,6 +2,7 @@ package converter
 
 import (
 	"context"
+	"errors"
 
 	"github.com/mochizuki875/llm-file-gateway/internal/converter/extractor"
 )
@@ -29,10 +30,12 @@ func NewDispatcher(registry Registry, configuration ConverterConfig, handle Conv
 }
 
 // ResolveConverter returns the converter for the given path, falling back to
-// the plain-text converter when no converter is registered.
+// the plain-text converter only when no converter is registered for the
+// extension. Factory failures are propagated so that a broken converter is
+// not silently replaced by the plain-text fallback.
 func (dispatcher *Dispatcher) ResolveConverter(ctx context.Context, path string) (DocumentConverter, error) {
 	documentConverter, err := dispatcher.registry.ForPath(ctx, path, dispatcher.configuration, dispatcher.handle)
-	if err != nil && dispatcher.fallback != nil {
+	if err != nil && dispatcher.fallback != nil && errors.Is(err, ErrConverterNotFound) {
 		return dispatcher.fallback, nil
 	}
 	return documentConverter, err

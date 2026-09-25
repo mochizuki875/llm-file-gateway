@@ -126,11 +126,11 @@ source_path, manifest_path, error_message, created_at, expires_at, deleted_at
 }
 
 // Get returns the non-deleted, non-expired file owned by the given tenant,
-// or nil when no such file exists.
+// or nil when no such file exists. A file with expires_at = 0 never expires.
 func (store *Store) Get(ctx context.Context, id, tenantID string) (*File, error) {
 	const query = `SELECT id, tenant_id, filename, media_type, purpose, byte_size, sha256,
 status, source_path, manifest_path, error_message, created_at, expires_at, deleted_at
-FROM files WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL AND expires_at > ?`
+FROM files WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL AND (expires_at = 0 OR expires_at > ?)`
 	file, err := scanFile(store.database.QueryRowContext(ctx, query, id, tenantID, store.now().Unix()))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -155,6 +155,25 @@ FROM files WHERE id = ?`
 		return nil, fmt.Errorf("get internal file: %w", err)
 	}
 	return &file, nil
+}
+
+// SourcePaths returns the persisted source paths for all files, including
+// expired and logically deleted records, for startup filesystem reconciliation.
+func (store *Store) SourcePaths(ctx context.Context) ([]string, error) {
+	rows, err := store.database.QueryContext(ctx, "SELECT source_path FROM files")
+	if err != nil {
+		return nil, fmt.Errorf("list file source paths: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("scan file source path: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, rows.Err()
 }
 
 // rowScanner abstracts *sql.Row and *sql.Rows so scanFile can be shared.
@@ -187,7 +206,7 @@ func (store *Store) List(ctx context.Context, tenantID, purpose string, limit in
 	arguments := []any{tenantID, store.now().Unix()}
 	query := `SELECT id, tenant_id, filename, media_type, purpose, byte_size, sha256,
 status, source_path, manifest_path, error_message, created_at, expires_at, deleted_at
-FROM files WHERE tenant_id = ? AND deleted_at IS NULL AND expires_at > ?`
+FROM files WHERE tenant_id = ? AND deleted_at IS NULL AND (expires_at = 0 OR expires_at > ?)`
 	if purpose != "" {
 		query += " AND purpose = ?"
 		arguments = append(arguments, purpose)
@@ -211,7 +230,7 @@ FROM files WHERE tenant_id = ? AND deleted_at IS NULL AND expires_at > ?`
 	if err != nil {
 		return nil, fmt.Errorf("list files: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	files := make([]File, 0)
 	for rows.Next() {
 		file, err := scanFile(rows)
@@ -277,21 +296,22 @@ func (store *Store) Delete(ctx context.Context, id, tenantID string) (bool, erro
 // Pending retrieves the IDs of files that are either uploaded or processing and have not expired or been deleted.
 func (store *Store) Pending(ctx context.Context) ([]string, error) {
 	return store.selectIDs(ctx,
-		"SELECT id FROM files WHERE status IN ('uploaded', 'processing') AND deleted_at IS NULL AND expires_at > ?",
+		"SELECT id FROM files WHERE status IN ('uploaded', 'processing') AND deleted_at IS NULL AND (expires_at = 0 OR expires_at > ?)",
 		store.now().Unix(),
 	)
 }
 
 // Expired returns all files that are deleted or past their expiry time.
+// Files with expires_at = 0 never expire and are never returned here.
 func (store *Store) Expired(ctx context.Context) ([]File, error) {
 	const query = `SELECT id, tenant_id, filename, media_type, purpose, byte_size, sha256,
 status, source_path, manifest_path, error_message, created_at, expires_at, deleted_at
-FROM files WHERE deleted_at IS NOT NULL OR expires_at <= ?`
+FROM files WHERE deleted_at IS NOT NULL OR (expires_at > 0 AND expires_at <= ?)`
 	rows, err := store.database.QueryContext(ctx, query, store.now().Unix())
 	if err != nil {
 		return nil, fmt.Errorf("list expired files: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var files []File
 	for rows.Next() {
 		file, err := scanFile(rows)
@@ -310,7 +330,7 @@ func (store *Store) selectIDs(ctx context.Context, query string, arguments ...an
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var ids []string
 	for rows.Next() {
 		var id string

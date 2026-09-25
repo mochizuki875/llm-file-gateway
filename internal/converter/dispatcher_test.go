@@ -3,8 +3,10 @@ package converter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +36,50 @@ func TestDispatcherDelegatesToSelectedPlugin(t *testing.T) {
 	}
 	if len(result.Warnings) != 1 || result.Warnings[0] != "custom" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+// TestDispatcherFallsBackOnlyForUnknownExtensions verifies that the plain-text
+// fallback is used only when no converter is registered for the extension.
+// A factory failure must be propagated instead of being silently replaced by
+// the fallback converter.
+func TestDispatcherFallsBackOnlyForUnknownExtensions(t *testing.T) {
+	registry := Registry{}
+	if err := registry.Register(".custom", ConverterAdapter(func(ConverterConfig) DocumentConverter {
+		return &testConverter{extension: ".custom", mediaType: "application/x-custom"}
+	})); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := NewDispatcher(registry, DefaultConverterConfig(), nil)
+
+	// Unknown extension: fallback to plain text.
+	documentConverter, err := dispatcher.ResolveConverter(context.Background(), "document.unknown")
+	if err != nil {
+		t.Fatalf("unknown extension: %v", err)
+	}
+	if documentConverter.MediaType() != "text/plain" {
+		t.Fatalf("unknown extension media type = %q, want text/plain", documentConverter.MediaType())
+	}
+
+	// Registered extension: the registered converter is returned.
+	documentConverter, err = dispatcher.ResolveConverter(context.Background(), "document.custom")
+	if err != nil {
+		t.Fatalf("registered extension: %v", err)
+	}
+	if documentConverter.MediaType() != "application/x-custom" {
+		t.Fatalf("registered extension media type = %q, want application/x-custom", documentConverter.MediaType())
+	}
+
+	// Factory failure: the error is propagated, not swallowed by the fallback.
+	failing := Registry{}
+	if err := failing.Register(".broken", func(context.Context, ConverterConfig, ConverterHandle) (DocumentConverter, error) {
+		return nil, errors.New("factory exploded")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	brokenDispatcher := NewDispatcher(failing, DefaultConverterConfig(), nil)
+	if _, err := brokenDispatcher.ResolveConverter(context.Background(), "document.broken"); err == nil || !strings.Contains(err.Error(), "factory exploded") {
+		t.Fatalf("factory failure = %v, want propagated error", err)
 	}
 }
 

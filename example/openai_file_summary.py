@@ -6,7 +6,7 @@ from pathlib import Path
 
 from openai import NotFoundError, OpenAI
 
-DOCUMENT_PATH = Path(__file__).with_name("samplefile.pdf")
+DOCUMENT_PATH = Path(__file__).with_name("samplefile.pptx")
 POLL_INTERVAL_SECONDS = 0.5
 PROCESSING_TIMEOUT_SECONDS = 600.0
 SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
@@ -29,7 +29,13 @@ def wait_until_processed(client: OpenAI, file_id: str) -> None:
         if remote_file.status == "processed":
             return
         if remote_file.status == "error":
-            raise RuntimeError(f"File processing failed: {file_id}")
+            details = ""
+            if remote_file.status_details is not None:
+                if isinstance(remote_file.status_details, dict):
+                    details = f": {remote_file.status_details.get('message', remote_file.status_details)}"
+                else:
+                    details = f": {remote_file.status_details}"
+            raise RuntimeError(f"File processing failed: {file_id}{details}")
         time.sleep(POLL_INTERVAL_SECONDS)
     raise TimeoutError(f"File processing timed out: {file_id}")
 

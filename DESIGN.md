@@ -90,6 +90,12 @@ type Extractor func(string) (string, error)
   - `extractor.HTML`はHTMLをパースし、`head`/`script`/`style`/`template`を除外して可視テキストを抽出する。
 - Converterでの処理結果は`convertRenderedDocument`、`convertTextDocument`、`convertImageDocument`へ渡され、共通変換処理でartifactとmanifestが生成される。
 
+#### Converterのライフサイクル
+
+- `Registry.Converter`は拡張子ごとの`ConverterFactory`を**解決のたびに呼び出し**、新しい`DocumentConverter`インスタンスを生成する。in-treeのconverterはすべてステートレス（`ConverterConfig`のみを保持し、変換ごとに独立して動作する）ため、この設計は意図的なものである。
+- ステートフルなリソース（接続プール、キャッシュ、一時ファイル等）を保持するout-of-tree converterは、factory内でリソースを生成し、`Convert`終了時に自ら解放する必要がある。factoryが返すconverterのライフサイクル管理はconverter実装者の責務であり、Registry/Dispatcherはconverterを再利用しない。
+- `Registry.Converter`は未登録拡張子に対して`ErrConverterNotFound`を返す。`Dispatcher.ResolveConverter`は`errors.Is`でこのエラーを判定し、**未登録拡張子のみ**`text/plain`のfallbackへ委譲する。factoryが返すエラー（初期化失敗等）はfallbackで握りつぶさず、そのまま呼び出し元へ伝播する。
+
 ```mermaid
 flowchart LR
   S[Source file] --> D[Dispatcher]
@@ -269,7 +275,7 @@ func NewInTreeRegistry() Registry {
 
 - 拡張子はRegistryで小文字に正規化されるが、登録時は小文字で統一する。
 - 未知拡張子はDispatcherが`text/plain`のfallbackへ委譲するため、テキスト系以外の形式を追加する場合は必ずRegistryへ登録する。
-- 文字数上限（`MaxTextChars`）とページ数上限（`MaxPages`）は共通変換処理で適用される。Converter側で独自に制限を追加する場合は`TextLimitError`/`PageLimitError`を返す。
+- 文字数上限（`MaxTextChars`）とページ数上限（`MaxPages`）は共通変換処理で適用される。`MaxPages`は`0`で無制限を意味し、rendererへは`RenderOptions.MaxPages`として渡される。`MaxTextChars`も`0`で無制限を意味し、rendererへは`ExtractOptions.MaxCharacters`として渡される。Converter側で独自に制限を追加する場合は`TextLimitError`/`PageLimitError`を返す。
 - 変換中に`outputDir`を直接操作しない。共通変換処理が`derived` directoryと`manifest.json`の初期化・後処理を担う。
 
 ## File Lifecycle
@@ -286,7 +292,7 @@ stateDiagram-v2
   failed --> deleted
 ```
 
-Files APIは保存後に`uploaded`を返す。`CONVERSION_WORKERS`個のworkerが変換し、manifestを永続化して`processed`へ更新する。worker数の既定値は2で、正の整数に変更できる。保持期限は作成時刻から`expires_after.seconds`後とし、未指定時は`FILE_TTL_SECONDS`（既定300秒）を使用する。`expires_after`は`anchor=created_at`と1秒以上`FILE_TTL_SECONDS`以下の秒数を要求する。Gatewayの再起動時には、SQLiteに残っている有効期限内の`uploaded`または`processing`状態のfile IDを変換queueへ追加し、変換を最初から再実行する。janitorは期限切れレコードと関連directoryを物理削除し、成功をDEBUG levelで記録する。
+Files APIは保存後に`uploaded`を返す。`CONVERSION_WORKERS`個のworkerが変換し、manifestを永続化して`processed`へ更新する。worker数の既定値は2で、正の整数に変更できる。保持期限は作成時刻から`expires_after.seconds`後とし、未指定時は`FILE_TTL_SECONDS`（既定300秒）を使用する。`FILE_TTL_SECONDS`は`0`で無制限を意味し、その場合は内部的に`expires_at=0`として保存され、FileObjectでは`null`を返す。`expires_after`は`anchor=created_at`と1秒以上`FILE_TTL_SECONDS`以下の秒数を要求する（`FILE_TTL_SECONDS=0`の場合は任意の正の秒数）。Gatewayの再起動時には、SQLiteに残っている有効期限内の`uploaded`または`processing`状態のfile IDを変換queueへ追加し、変換を最初から再実行する。また、SQLiteの全recordが参照するsource directoryと`files/`配下を照合し、DB recordを持たないGateway形式のfile directoryだけを削除する。永続file directory、request temporary directory、derived directoryは`0700`、source、derived artifact、manifestは`0600`で新規作成する。janitorは期限切れレコードと関連directoryを物理削除し、成功をDEBUG levelで記録する。
 
 ```mermaid
 sequenceDiagram
@@ -320,25 +326,29 @@ queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworke
 
 入力は選択されたConverterが拡張子に対応する基本signatureを検証する。PDFとOfficeは`document-image-renderer`の`pkg/renderer.RenderDocument`で300 DPI PNGへ描画し、抽出が有効な場合は`ExtractDocumentWithOptions`でテキストも取得する。どちらもLibreOffice timeoutは300秒とする。描画DPIは`DOCUMENT_DPI`（既定300、1〜1200）で変更できる。rendererはPDFをPDFium/WASMで直接処理し、Officeを必要に応じてLibreOfficeで一時変換する。DOC/DOCXはページ、PPT/PPTXはスライド、XLS/XLSX/XLSMはworksheetが画像単位となる。
 
+`convertRenderedDocument`は**描画をテキスト抽出より先に実行**する。`RenderDocument`は描画開始前に`MaxPages`を検証するため、ページ数上限を超えるドキュメントは全ページのテキスト抽出を行う前に`PageLimitError`で失敗する。これにより、巨大なPDF（例: 1000ページ、`MAX_DOCUMENT_PAGES=50`）で全ページのテキスト抽出が実行される無駄を防ぐ。ページ数上限の判定はrendererへ委譲し、Gateway側では`RenderDocument`の結果に対する後置チェックを行わない。
+
 Gatewayは`document-image-renderer`の既定値をそのまま使わず、`DefaultRenderOptions`を取得して必要なfieldだけを上書きする。`document-image-renderer`はページ単位で画像を保存し、途中失敗時に既生成画像を残す。また出力directory内の無関係なfileを削除しない。このためGatewayは専有する`derived` directoryと同階層の`manifest.json`を変換開始前に初期化し、変換が完了しなければ両方を削除する。`document-image-renderer`が返す`UnsupportedFormatError`、`DependencyNotFoundError`、`DocumentConversionError`、`DocumentRenderError`を含む変換errorはconverterから呼び出し元へ伝播する。
 
-PDFと全Office形式のテキスト抽出は`document-image-renderer`へ委譲し、Gatewayは`ExtractResult.Text()`で結合したファイル全体のテキストを一つのartifactとして保存する。`document-image-renderer`は抽出text partと描画画像の対応を保証しないため、テキストへpage、slide、sheet番号を割り当てない。描画画像は元ファイルのページ、スライド、シート単位のartifactとして順序と番号を保持する。`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とし、`false`の場合は`document-image-renderer`の抽出処理を呼ばず、PDFとOfficeを画像だけのcontent partへ展開する。テキスト系は入力内容そのものであるため設定対象外とし、UTF-8を要求する。HTMLは非表示要素を除外し、未知拡張子のUTF-8テキストはplain textとして内容をそのまま保持する。JPEG/PNGは再圧縮しない。抽出を有効にした場合、文字数上限はtext-only形式だけでなく、PDFとOfficeにも描画前に適用する。
+PDFと全Office形式のテキスト抽出は`document-image-renderer`へ委譲し、Gatewayは`ExtractResult.Text()`で結合したファイル全体のテキストを一つのartifactとして保存する。`document-image-renderer`は抽出text partと描画画像の対応を保証しないため、テキストへpage、slide、sheet番号を割り当てない。描画画像は元ファイルのページ、スライド、シート単位のartifactとして順序と番号を保持する。`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とし、`false`の場合は`document-image-renderer`の抽出処理を呼ばず、PDFとOfficeを画像だけのcontent partへ展開する。テキスト系は入力内容そのものであるため設定対象外とし、UTF-8を要求する。HTMLは非表示要素を除外し、未知拡張子のUTF-8テキストはplain textとして内容をそのまま保持する。JPEG/PNGは再圧縮しない。抽出を有効にした場合、文字数上限は`ExtractOptions.MaxCharacters`としてrendererへ渡し、PDFとOfficeの文字数制限もrendererに委譲する。rendererが返す`CharacterLimitExceededError`は`TextLimitError`へ変換する。text-only形式の文字数上限はGateway側の`validateTextLimit`で適用する。
 
 成果物は`manifest.json`、ファイル単位の抽出text、part単位のimageで構成する。schema version 3ではdocumentの`text_path`と各image partを独立させる。Files API成果物は`GATEWAY_DATA_DIR/files/<tenant>/<file_id>`、inline入力は`work`以下へ置き、request終了時に削除する。
 
-Responses APIとChat Completions APIの`stream: true`は、入力展開後にvLLMへそのまま転送する。vLLMのSSE response headerとbodyを変換せず、eventを受信するたびにclientへflushする。client切断時はrequest contextを通じて上流通信をcancelする。`REQUEST_TIMEOUT_SECONDS`はstream全体の上限にも適用する。
+Responses APIとChat Completions APIの`stream: true`は、入力展開後にvLLMへそのまま転送する。vLLMのSSE response headerとbodyを変換せず、eventを受信するたびにclientへflushする。client切断時はrequest contextを通じて上流通信をcancelする。`REQUEST_TIMEOUT_SECONDS`はstream全体の上限にも適用する（`0`で無制限）。
 
 ## Inference Expansion
 
 Responsesの`input_file`、Chat Completionsの`file`を次のpartへ置換する。
 
 1. `<document ...>`で囲んだ抽出テキスト
-2. 画像がある場合はbase64 data URL（`MAX_DOCUMENT_IMAGES`、既定8個まで）
+2. 画像がある場合はbase64 data URL（`MAX_DOCUMENT_PAGES`、既定50個まで）
 3. 呼び出し元が指定した通常のcontent part
 
 ファイルを展開した場合は、ドキュメント内容を信頼できないsource materialとして扱う指示（`documentInstruction`）をResponsesでは`instructions`の先頭へ、Chatでは先頭のsystem messageとして注入する。
 
-Responsesは`file_id`、`file_data`、`file_url`、Chatは`file_id`と`file_data`を受け付ける。`file_url`はHTTPS:443、公開IP、最大4 redirectに限定し、各redirectを再検証する。
+Responsesは`file_id`、`file_data`、`file_url`、Chatは`file_id`と`file_data`を受け付ける。`file_url`はHTTPS:443、公開IP、最大4 redirectに限定し、各redirectを再検証する。なおOpenAIのChat Completions APIは`file` inputをサポートしないが、GatewayはChat Completionsでも`file_id`と`file_data`を拡張として受け付ける。
+
+`file_data`はbase64でエンコードされたファイル内容をリクエストボディに含めるため、複数ファイルを同時に送るとボディが`MAX_FILE_BYTES`の数倍に膨らむ。このため推論リクエストのボディ全体には`MAX_REQUEST_BODY_BYTES`（既定`MAX_FILE_BYTES`の4倍）を適用する。`MAX_FILE_BYTES`は1ファイルあたりの上限、`MAX_REQUEST_BODY_BYTES`はリクエスト全体の上限として機能し、両方を超えるリクエストは`invalid_request`で拒否される。`MAX_FILE_BYTES`と`MAX_REQUEST_BODY_BYTES`はどちらも`0`で無制限を意味し、`MAX_FILE_BYTES=0`の場合は`MAX_REQUEST_BODY_BYTES`の既定値も0（無制限）となる。
 
 ### vLLMへの最終リクエスト
 
@@ -383,7 +393,7 @@ Responsesは`file_id`、`file_data`、`file_url`、Chatは`file_id`と`file_data
 ```
 
 - テキストpartは`<document filename="..." [part="N" | page="N"]>`タグで囲む。ファイル全体のテキストは`part`/`page`属性なし、part単位のテキストは`part`（描画画像と対応する場合は`page`）属性付き。
-- 画像partはbase64 data URL（`data:<media_type>;base64,...`）で、`MAX_DOCUMENT_IMAGES`（既定8）個まで展開する。
+- 画像partはbase64 data URL（`data:<media_type>;base64,...`）で、`MAX_DOCUMENT_PAGES`（既定50）個まで展開する。
 - `stream: true`の場合はvLLMのSSE responseをそのままclientへflushする。
 
 ## Authentication
