@@ -93,6 +93,7 @@ func copyHeaders(destination, source http.Header) {
 // request is a streaming one.
 func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Request, endpoint string, payload map[string]any) {
 	content, _ := json.Marshal(payload)
+
 	upstreamURL := strings.TrimRight(server.settings.VLLMBaseURL.String(), "/") + "/" + endpoint
 	upstreamRequest, _ := http.NewRequestWithContext(request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(content))
 	upstreamRequest.Header.Set("Content-Type", "application/json")

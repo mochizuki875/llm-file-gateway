@@ -32,13 +32,39 @@ type Service struct {
 	cancel     context.CancelFunc
 	wait       sync.WaitGroup
 
+	// lifecycleCtx is cancelled when the service stops. It is used for
+	// conversion enqueueing so that a conversion job is not tied to the HTTP
+	// request that created the file.
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+
+	// lifecycleMu guards the conversions map of in-flight conversions so that
+	// Delete and the janitor can wait for (or cancel) the conversion of a
+	// specific file without serializing conversions of other files.
+	lifecycleMu sync.Mutex
+	conversions map[string]*fileLifecycle
+
 	// syncHandler is used for processing a single conversion job.
 	// It is a field to allow injection for testing.
 	syncHandler func(ctx context.Context, job conversionJob) error
 
+	// afterPersist is invoked after the file record is persisted and before
+	// the conversion job is enqueued. It is used by tests to simulate a
+	// request context cancellation at the lifecycle boundary.
+	afterPersist func()
+
 	// retryCount tracks the number of retries per file ID.
 	retryMu    sync.Mutex
 	retryCount map[string]int
+}
+
+// fileLifecycle tracks a single in-flight conversion so that deletion can
+// coordinate with it. done is closed when the conversion finishes.
+type fileLifecycle struct {
+	mu     sync.Mutex
+	active bool
+	done   chan struct{}
+	cancel context.CancelFunc
 }
 
 // conversionJob is a single unit of work for the conversion workers.
@@ -55,9 +81,17 @@ func New(settings config.Config, dataStore *store.Store, dispatcher *converter.D
 	if dispatcher == nil {
 		panic("converter dispatcher must not be nil")
 	}
-	service := &Service{settings: settings, store: dataStore, dispatcher: dispatcher, queue: make(chan conversionJob, 128), retryCount: make(map[string]int)}
+	service := &Service{settings: settings, store: dataStore, dispatcher: dispatcher, queue: make(chan conversionJob, 128), retryCount: make(map[string]int), conversions: make(map[string]*fileLifecycle)}
+	service.lifecycleCtx, service.lifecycleCancel = context.WithCancel(context.Background())
 	service.syncHandler = service.convert
 	return service
+}
+
+// lifecycle returns the service lifecycle context. It is cancelled by Stop so
+// that conversion enqueueing is tied to the service lifetime rather than to
+// any individual HTTP request.
+func (service *Service) lifecycle() context.Context {
+	return service.lifecycleCtx
 }
 
 // ResolveConverter returns the converter for the given path, falling back to
@@ -88,7 +122,7 @@ func (service *Service) Run(ctx context.Context, workers int) error {
 
 	// Enqueue the pending files for conversion.
 	for _, id := range pending {
-		service.enqueue(workerContext, conversionJob{id: id})
+		service.enqueue(service.lifecycle(), conversionJob{id: id})
 	}
 
 	slog.Info("file service started", "workers", workers, "pending_files", len(pending))
@@ -100,6 +134,9 @@ func (service *Service) Run(ctx context.Context, workers int) error {
 func (service *Service) Stop() {
 	if service.cancel != nil {
 		service.cancel()
+	}
+	if service.lifecycleCancel != nil {
+		service.lifecycleCancel()
 	}
 	service.wait.Wait()
 	slog.Info("file service stopped")
@@ -162,13 +199,22 @@ func (service *Service) Create(ctx context.Context, filename string, source io.R
 		return nil, err
 	}
 	keepFiles = true
-	service.enqueue(ctx, conversionJob{id: id, documentConverter: documentConverter})
+	// The conversion lifecycle is decoupled from the HTTP request: once the
+	// record is persisted, enqueueing uses the service lifecycle context so
+	// that a client disconnect cannot prevent the conversion from starting.
+	if service.afterPersist != nil {
+		service.afterPersist()
+	}
+	service.enqueue(service.lifecycle(), conversionJob{id: id, documentConverter: documentConverter})
 	slog.Info("file accepted", "file_id", id, "filename", safeName, "bytes", written)
 	return record, nil
 }
 
 // Delete removes the file directory and the database record for the given
-// file, reporting whether a file was actually deleted.
+// file, reporting whether a file was actually deleted. It first marks the
+// record as logically deleted so that the file disappears from the API and no
+// new conversion can start, then waits for any in-flight conversion to finish
+// before removing the on-disk artifacts and the database record.
 func (service *Service) Delete(ctx context.Context, id, tenantID string) (bool, error) {
 	record, err := service.store.Get(ctx, id, tenantID)
 	if err != nil {
@@ -178,6 +224,15 @@ func (service *Service) Delete(ctx context.Context, id, tenantID string) (bool, 
 		slog.Warn("file not found", "file_id", id, "param", "file_id")
 		return false, nil
 	}
+	marked, err := service.store.MarkDeleted(ctx, id, tenantID)
+	if err != nil {
+		return false, err
+	}
+	if !marked {
+		// Already deleted (or deleted concurrently); nothing left to do.
+		return false, nil
+	}
+	service.waitForConversion(id)
 	if err := os.RemoveAll(filepath.Dir(filepath.Join(service.settings.DataDir, record.SourcePath))); err != nil {
 		return false, err
 	}
@@ -255,10 +310,59 @@ func (service *Service) processNextJob(ctx context.Context) bool {
 		if !ok {
 			return false
 		}
-		err := service.syncHandler(ctx, job)
+		// Each conversion runs under a per-file context so that Delete and
+		// the janitor can cancel a specific conversion without affecting
+		// conversions of other files.
+		fileCtx, cancel := context.WithCancel(ctx)
+		state := service.beginConversion(job.id, cancel)
+		err := service.syncHandler(fileCtx, job)
+		service.endConversion(job.id, state)
 		service.handleErr(ctx, err, job)
 		return true
 	}
+}
+
+// beginConversion registers an in-flight conversion for the given file and
+// returns its lifecycle state. It is safe to call concurrently with Delete.
+func (service *Service) beginConversion(id string, cancel context.CancelFunc) *fileLifecycle {
+	state := &fileLifecycle{active: true, done: make(chan struct{}), cancel: cancel}
+	service.lifecycleMu.Lock()
+	service.conversions[id] = state
+	service.lifecycleMu.Unlock()
+	return state
+}
+
+// endConversion unregisters an in-flight conversion and signals any waiter.
+func (service *Service) endConversion(id string, state *fileLifecycle) {
+	service.lifecycleMu.Lock()
+	if current, ok := service.conversions[id]; ok && current == state {
+		delete(service.conversions, id)
+	}
+	service.lifecycleMu.Unlock()
+	state.mu.Lock()
+	state.active = false
+	close(state.done)
+	state.mu.Unlock()
+}
+
+// waitForConversion waits for any in-flight conversion of the given file to
+// finish, cancelling it first. It returns immediately when no conversion is
+// active. It never blocks conversions of other files.
+func (service *Service) waitForConversion(id string) {
+	service.lifecycleMu.Lock()
+	state, ok := service.conversions[id]
+	service.lifecycleMu.Unlock()
+	if !ok {
+		return
+	}
+	state.mu.Lock()
+	if !state.active {
+		state.mu.Unlock()
+		return
+	}
+	state.cancel()
+	state.mu.Unlock()
+	<-state.done
 }
 
 // handleErr retries a failed conversion job with exponential backoff,
@@ -281,9 +385,25 @@ func (service *Service) handleErr(ctx context.Context, err error, job conversion
 		service.forget(job.id)
 		return
 	}
+	if !service.fileActive(job.id) {
+		// The file was deleted while the conversion was failing; do not
+		// schedule a retry that could resurrect it.
+		service.forget(job.id)
+		return
+	}
 	delay := backoffDelay(service.retries(job.id))
 	slog.Warn("error converting file, retrying", "file_id", job.id, "error", err, "retry", service.retries(job.id)+1, "delay", delay)
 	service.enqueueAfter(ctx, job, delay)
+}
+
+// fileActive reports whether the given file still exists and has not been
+// logically deleted. It is used to avoid retrying conversions of deleted files.
+func (service *Service) fileActive(id string) bool {
+	record, err := service.store.GetInternal(context.Background(), id)
+	if err != nil || record == nil || record.DeletedAt.Valid {
+		return false
+	}
+	return true
 }
 
 func (service *Service) retries(id string) int {
@@ -317,8 +437,15 @@ func (service *Service) convert(ctx context.Context, job conversionJob) error {
 		logging.V(ctx, 2, "skipping deleted queued file", "file_id", job.id)
 		return nil
 	}
-	if err := service.store.UpdateStatus(ctx, job.id, "processing", "", ""); err != nil {
+	updated, err := service.store.UpdateStatus(ctx, job.id, "processing", "", "")
+	if err != nil {
 		return fmt.Errorf("document processing status update: %w", err)
+	}
+	if !updated {
+		// The file was deleted (or logically deleted) between the lookup and
+		// the status update. Do not start conversion and do not resurrect it.
+		logging.V(ctx, 2, "skipping conversion of deleted file", "file_id", job.id)
+		return nil
 	}
 	source := filepath.Join(service.settings.DataDir, record.SourcePath)
 	documentConverter := job.documentConverter
@@ -339,17 +466,31 @@ func (service *Service) convert(ctx context.Context, job conversionJob) error {
 		return fmt.Errorf("document conversion: %w", err)
 	}
 	manifestPath := filepath.ToSlash(filepath.Join(filepath.Dir(record.SourcePath), "manifest.json"))
-	if err := service.store.UpdateStatus(context.Background(), job.id, "processed", manifestPath, ""); err != nil {
-		return fmt.Errorf("document conversion status update: %w", err)
+	updated, statusErr := service.store.UpdateStatus(context.Background(), job.id, "processed", manifestPath, "")
+	if statusErr != nil {
+		return fmt.Errorf("document conversion status update: %w", statusErr)
+	}
+	if !updated {
+		// The file was deleted while conversion was running. The artifacts
+		// were written but the record is gone (or logically deleted), so the
+		// file must not be resurrected as processed.
+		logging.V(ctx, 2, "skipping status update for deleted file", "file_id", job.id)
+		return nil
 	}
 	slog.Info("document conversion completed", "file_id", job.id, "parts_manifest", manifestPath, "duration_ms", time.Since(startedAt).Milliseconds())
 	return nil
 }
 
-// markFailed records a terminal conversion failure for the given file.
+// markFailed records a terminal conversion failure for the given file. It is a
+// no-op when the file was deleted concurrently.
 func (service *Service) markFailed(id string, err error) {
-	if statusErr := service.store.UpdateStatus(context.Background(), id, "failed", "", truncate(err.Error(), 1000)); statusErr != nil {
+	updated, statusErr := service.store.UpdateStatus(context.Background(), id, "failed", "", truncate(err.Error(), 1000))
+	if statusErr != nil {
 		slog.Error("document failure status update failed", "file_id", id, "error", statusErr)
+		return
+	}
+	if !updated {
+		logging.V(context.Background(), 2, "skipping failure status for deleted file", "file_id", id)
 	}
 }
 
@@ -377,6 +518,14 @@ func (service *Service) deleteExpired(ctx context.Context) {
 		return
 	}
 	for _, record := range expired {
+		// Mark the record as logically deleted first so that a conversion
+		// that is about to start (or is running) cannot resurrect the file,
+		// then wait for any in-flight conversion before removing artifacts.
+		if _, err := service.store.MarkDeleted(ctx, record.ID, record.TenantID); err != nil {
+			slog.Warn("expired file mark failed", "file_id", record.ID, "error", err)
+			continue
+		}
+		service.waitForConversion(record.ID)
 		if err := os.RemoveAll(filepath.Dir(filepath.Join(service.settings.DataDir, record.SourcePath))); err != nil {
 			slog.Warn("expired file cleanup failed", "file_id", record.ID, "error", err)
 			continue

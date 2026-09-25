@@ -64,6 +64,51 @@ func TestStoreScopesFilesByTenantAndLifetime(t *testing.T) {
 	}
 }
 
+func TestMarkDeletedAndUpdateStatusSkipsDeleted(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Unix(2_000_000_000, 0)
+	store.now = func() time.Time { return now }
+	file := testFile("file_mark", "tenant-a", now.Unix(), now.Add(time.Hour).Unix())
+	if err := store.Add(context.Background(), file); err != nil {
+		t.Fatal(err)
+	}
+
+	marked, err := store.MarkDeleted(context.Background(), file.ID, file.TenantID)
+	if err != nil || !marked {
+		t.Fatalf("mark deleted = %t, %v; want true, nil", marked, err)
+	}
+	// Marking again reports false (already deleted).
+	marked, err = store.MarkDeleted(context.Background(), file.ID, file.TenantID)
+	if err != nil || marked {
+		t.Fatalf("second mark deleted = %t, %v; want false, nil", marked, err)
+	}
+	// A logically deleted file is hidden from the public API.
+	if current, err := store.Get(context.Background(), file.ID, file.TenantID); err != nil || current != nil {
+		t.Fatalf("get after mark = %#v, %v; want nil, nil", current, err)
+	}
+	// Status updates must not resurrect a logically deleted file.
+	updated, err := store.UpdateStatus(context.Background(), file.ID, "processed", "files/manifest.json", "")
+	if err != nil || updated {
+		t.Fatalf("update status after mark = %t, %v; want false, nil", updated, err)
+	}
+	current, err := store.GetInternal(context.Background(), file.ID)
+	if err != nil || current == nil {
+		t.Fatalf("internal get = %#v, %v", current, err)
+	}
+	if current.Status != "uploaded" || !current.DeletedAt.Valid {
+		t.Fatalf("record after update = %#v; want unchanged uploaded + deleted_at", current)
+	}
+	// The record is still reported as expired for physical cleanup.
+	expired, err := store.Expired(context.Background())
+	if err != nil || len(expired) != 1 || expired[0].ID != file.ID {
+		t.Fatalf("expired = %#v, %v; want the marked file", expired, err)
+	}
+}
+
 func TestPendingAndStatusUpdate(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
@@ -81,8 +126,8 @@ func TestPendingAndStatusUpdate(t *testing.T) {
 	if err != nil || len(ids) != 1 || ids[0] != file.ID {
 		t.Fatalf("pending = %v, %v", ids, err)
 	}
-	if err := store.UpdateStatus(context.Background(), file.ID, "processed", "files/manifest.json", ""); err != nil {
-		t.Fatal(err)
+	if updated, err := store.UpdateStatus(context.Background(), file.ID, "processed", "files/manifest.json", ""); err != nil || !updated {
+		t.Fatalf("update status = %t, %v", updated, err)
 	}
 	updated, err := store.Get(context.Background(), file.ID, file.TenantID)
 	if err != nil {
@@ -131,6 +176,79 @@ func TestExpiredIncludesLegacyDeletedFiles(t *testing.T) {
 	files, err := dataStore.Expired(context.Background())
 	if err != nil || len(files) != 1 || files[0].ID != file.ID {
 		t.Fatalf("cleanup candidates = %#v, %v; want %s", files, err, file.ID)
+	}
+}
+
+func TestListPaginationWithSameCreatedAt(t *testing.T) {
+	dataStore, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	now := time.Unix(2_000_000_000, 0)
+	dataStore.now = func() time.Time { return now }
+
+	// 30 files share the exact same created_at; ids are generated in a
+	// deterministic order so the expected total order is known.
+	const total = 30
+	for index := 0; index < total; index++ {
+		file := testFile(fmt.Sprintf("file_%02d", index), "tenant-a", now.Unix(), now.Add(time.Hour).Unix())
+		file.Purpose = "user_data"
+		if index%2 == 0 {
+			file.Purpose = "assistants"
+		}
+		if err := dataStore.Add(context.Background(), file); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Walk every page in both directions and verify no file is lost or
+	// duplicated, including with a purpose filter.
+	for _, test := range []struct {
+		name    string
+		order   string
+		purpose string
+	}{
+		{name: "desc_all", order: "desc"},
+		{name: "asc_all", order: "asc"},
+		{name: "desc_purpose", order: "desc", purpose: "assistants"},
+		{name: "asc_purpose", order: "asc", purpose: "assistants"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			seen := make(map[string]bool)
+			after := ""
+			for page := 0; ; page++ {
+				records, err := dataStore.List(context.Background(), "tenant-a", test.purpose, 7, test.order, after)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(records) == 0 {
+					break
+				}
+				if len(records) > 7 {
+					t.Fatalf("page %d returned %d records, want at most 7", page, len(records))
+				}
+				for _, record := range records {
+					if seen[record.ID] {
+						t.Fatalf("page %d returned duplicate file %s", page, record.ID)
+					}
+					seen[record.ID] = true
+				}
+				after = records[len(records)-1].ID
+				if page > total {
+					t.Fatal("pagination did not terminate")
+				}
+			}
+			want := 0
+			for index := 0; index < total; index++ {
+				if test.purpose == "" || index%2 == 0 {
+					want++
+				}
+			}
+			if len(seen) != want {
+				t.Fatalf("walked %d files, want %d", len(seen), want)
+			}
+		})
 	}
 }
 

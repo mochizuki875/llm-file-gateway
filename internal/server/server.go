@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -26,6 +27,11 @@ type Server struct {
 	store    *store.Store
 	files    *files.Service
 	client   *http.Client
+
+	// resolver resolves hostnames for file URL SSRF validation.
+	resolver ipResolver
+	// fileDialer pins file URL connections to validated public IPs.
+	fileDialer *publicDialer
 }
 
 // NewHandler builds the HTTP handler that exposes the health, Files, Responses,
@@ -34,6 +40,11 @@ func NewHandler(settings config.Config, dataStore *store.Store, fileService *fil
 	server := &Server{
 		settings: settings, store: dataStore, files: fileService,
 		client: &http.Client{Timeout: settings.RequestTimeout},
+	}
+	server.resolver = net.DefaultResolver
+	server.fileDialer = &publicDialer{
+		resolver: server.resolver,
+		dial:     (&net.Dialer{Timeout: settings.RequestTimeout}).DialContext,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)

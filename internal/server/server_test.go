@@ -518,6 +518,194 @@ func TestResponsesReportsDocumentTextLimit(t *testing.T) {
 	}
 }
 
+func TestInlineFileDataExactLimitAccepted(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	settings.MaxFileBytes = 4 << 20
+	settings.MaxDocumentTextChars = 10 << 20
+	handler := NewHandler(settings, dataStore, service)
+
+	content := strings.Repeat("a", int(settings.MaxFileBytes))
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_file", "filename": "notes.txt",
+				"file_data": base64.StdEncoding.EncodeToString([]byte(content)),
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	// The encoded body must exceed the old raw-file limit (MaxFileBytes + 1 MiB)
+	// so this test reproduces the bug where base64 expansion alone caused a
+	// rejection before the decoded size was checked.
+	if len(body) <= int(settings.MaxFileBytes)+1<<20 {
+		t.Fatalf("test setup: encoded body = %d bytes, want > %d", len(body), int(settings.MaxFileBytes)+1<<20)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestInlineFileDataOverDecodedLimitRejected(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMModel = "test-model"
+	settings.MaxFileBytes = 4 << 20
+	settings.MaxDocumentTextChars = 10 << 20
+	handler := NewHandler(settings, dataStore, service)
+
+	content := strings.Repeat("a", int(settings.MaxFileBytes)+1)
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_file", "filename": "notes.txt",
+				"file_data": base64.StdEncoding.EncodeToString([]byte(content)),
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "file_too_large" {
+		t.Fatalf("error code = %q, want file_too_large", result.Error.Code)
+	}
+}
+
+func TestInlineFileDataOversizedBodyRejected(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMModel = "test-model"
+	settings.MaxFileBytes = 4 << 20
+	handler := NewHandler(settings, dataStore, service)
+
+	content := strings.Repeat("a", int(settings.MaxFileBytes)*2)
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_file", "filename": "notes.txt",
+				"file_data": base64.StdEncoding.EncodeToString([]byte(content)),
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "invalid_request" {
+		t.Fatalf("error code = %q, want invalid_request", result.Error.Code)
+	}
+}
+
+func TestInlineFileDataMalformedBase64Rejected(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_file", "filename": "notes.txt",
+				"file_data": "not valid base64!!!",
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "invalid_file_data" {
+		t.Fatalf("error code = %q, want invalid_file_data", result.Error.Code)
+	}
+}
+
+func TestInlineFileDataMultiFileTotalLimit(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMModel = "test-model"
+	settings.MaxFileBytes = 4 << 20
+	handler := NewHandler(settings, dataStore, service)
+
+	content := strings.Repeat("a", int(settings.MaxFileBytes))
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_file", "filename": "a.txt", "file_data": base64.StdEncoding.EncodeToString([]byte(content))},
+				map[string]any{"type": "input_file", "filename": "b.txt", "file_data": base64.StdEncoding.EncodeToString([]byte(content))},
+			},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "invalid_request" {
+		t.Fatalf("error code = %q, want invalid_request", result.Error.Code)
+	}
+}
+
 func TestDocumentPartsReportsMissingArtifact(t *testing.T) {
 	settings, _, _ := testDependencies(t)
 	server := &Server{settings: settings}
@@ -801,8 +989,8 @@ func TestListFiles(t *testing.T) {
 		return created["id"].(string)
 	}
 	firstID := create("first.txt", "user_data")
-	// created_at is stored with second precision, so wait to make the cursor
-	// comparison in the after-filter deterministic.
+	// created_at is stored with second precision, so wait between creates to
+	// make the cursor comparison in the after-filter deterministic.
 	time.Sleep(1100 * time.Millisecond)
 	secondID := create("second.txt", "assistants")
 
@@ -850,6 +1038,9 @@ func TestListFiles(t *testing.T) {
 		t.Fatalf("purpose-filtered list = %#v", list)
 	}
 
+	// created_at is stored with second precision, so wait before creating
+	// third.txt to keep the after-filter below deterministic.
+	time.Sleep(1100 * time.Millisecond)
 	_ = create("third.txt", "user_data")
 	time.Sleep(1100 * time.Millisecond)
 	fourthID := create("fourth.txt", "assistants")
@@ -985,6 +1176,185 @@ func TestExpandChatRejectsNonArrayMessages(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestResponsesWithoutFileDoesNotInjectInstruction(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":"Hello"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	if _, exists := upstreamPayload["instructions"]; exists {
+		t.Fatalf("instructions injected for a file-free request: %#v", upstreamPayload["instructions"])
+	}
+	if upstreamPayload["input"] != "Hello" {
+		t.Fatalf("input = %#v, want unchanged", upstreamPayload["input"])
+	}
+}
+
+func TestChatWithoutFileDoesNotInjectSystemMessage(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "chat_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"Hello"}]}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	messages := upstreamPayload["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("messages = %#v, want the original single message", messages)
+	}
+	if messages[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("message = %#v, want unchanged user message", messages[0])
+	}
+}
+
+func TestResponsesWithFileInjectsInstruction(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+
+	payload := map[string]any{
+		"model": "test-model",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_file", "filename": "notes.txt",
+				"file_data": base64.StdEncoding.EncodeToString([]byte("document text")),
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	instructions, ok := upstreamPayload["instructions"].(string)
+	if !ok || !strings.Contains(instructions, "untrusted content") {
+		t.Fatalf("instructions = %#v, want document instruction", upstreamPayload["instructions"])
+	}
+}
+
+func TestResponsesWithFilePreservesExistingInstructions(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+
+	payload := map[string]any{
+		"model":        "test-model",
+		"instructions": "Be concise.",
+		"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_file", "filename": "notes.txt",
+				"file_data": base64.StdEncoding.EncodeToString([]byte("document text")),
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	instructions, ok := upstreamPayload["instructions"].(string)
+	if !ok || !strings.Contains(instructions, "untrusted content") || !strings.Contains(instructions, "Be concise.") {
+		t.Fatalf("instructions = %#v, want document instruction plus user instructions", upstreamPayload["instructions"])
+	}
+}
+
+func TestChatWithFilePreservesExistingSystemMessage(t *testing.T) {
+	var upstreamPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
+			t.Error(err)
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"id": "chat_1"})
+	}))
+	defer upstream.Close()
+	settings, dataStore, service := testDependencies(t)
+	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+	settings.VLLMModel = "test-model"
+	handler := NewHandler(settings, dataStore, service)
+
+	payload := map[string]any{
+		"model": "test-model",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are helpful."},
+			map[string]any{"role": "user", "content": []any{map[string]any{
+				"type": "file", "file": map[string]any{
+					"file_data": base64.StdEncoding.EncodeToString([]byte("chat document")),
+					"filename":  "notes.txt",
+				},
+			}}},
+		},
+	}
+	body, _ := json.Marshal(payload)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	messages := upstreamPayload["messages"].([]any)
+	if len(messages) != 3 {
+		t.Fatalf("messages = %#v, want document system message plus original messages", messages)
+	}
+	system := messages[0].(map[string]any)
+	if system["role"] != "system" || !strings.Contains(system["content"].(string), "untrusted content") {
+		t.Fatalf("document system message = %#v", system)
+	}
+	original := messages[1].(map[string]any)
+	if original["role"] != "system" || original["content"] != "You are helpful." {
+		t.Fatalf("original system message = %#v", original)
 	}
 }
 

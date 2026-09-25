@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS files (
     deleted_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS files_tenant_created ON files (tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS files_tenant_created_id ON files (tenant_id, created_at, id);
 CREATE INDEX IF NOT EXISTS files_status ON files (status);
 CREATE INDEX IF NOT EXISTS files_expires_at ON files (expires_at);`
 	if _, err := store.database.ExecContext(ctx, schema); err != nil {
@@ -173,8 +174,9 @@ func scanFile(row rowScanner) (File, error) {
 }
 
 // List returns up to limit files for the given tenant, optionally filtered by
-// purpose and ordered by created_at (asc or desc). When after is non-empty,
-// only files created after (or before, for desc) the cursor file are returned.
+// purpose and ordered by created_at (asc or desc) with id as a tie-breaker.
+// When after is non-empty, only files strictly after (or before, for desc)
+// the cursor file in that total order are returned.
 func (store *Store) List(ctx context.Context, tenantID, purpose string, limit int, order, after string) ([]File, error) {
 	direction := "DESC"
 	comparison := "<"
@@ -192,17 +194,18 @@ FROM files WHERE tenant_id = ? AND deleted_at IS NULL AND expires_at > ?`
 	}
 	if after != "" {
 		var cursorCreatedAt int64
+		var cursorID string
 		err := store.database.QueryRowContext(ctx,
-			"SELECT created_at FROM files WHERE id = ? AND tenant_id = ?", after, tenantID,
-		).Scan(&cursorCreatedAt)
+			"SELECT created_at, id FROM files WHERE id = ? AND tenant_id = ?", after, tenantID,
+		).Scan(&cursorCreatedAt, &cursorID)
 		if err == nil {
-			query += " AND created_at " + comparison + " ?"
-			arguments = append(arguments, cursorCreatedAt)
+			query += " AND (created_at " + comparison + " ? OR (created_at = ? AND id " + comparison + " ?))"
+			arguments = append(arguments, cursorCreatedAt, cursorCreatedAt, cursorID)
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("get list cursor: %w", err)
 		}
 	}
-	query += " ORDER BY created_at " + direction + " LIMIT ?"
+	query += " ORDER BY created_at " + direction + ", id " + direction + " LIMIT ?"
 	arguments = append(arguments, limit)
 	rows, err := store.database.QueryContext(ctx, query, arguments...)
 	if err != nil {
@@ -221,16 +224,40 @@ FROM files WHERE tenant_id = ? AND deleted_at IS NULL AND expires_at > ?`
 }
 
 // UpdateStatus updates the processing status of a file, optionally recording
-// the manifest path or an error message.
-func (store *Store) UpdateStatus(ctx context.Context, id, status, manifestPath, errorMessage string) error {
-	_, err := store.database.ExecContext(ctx,
-		`UPDATE files SET status = ?, manifest_path = NULLIF(?, ''), error_message = NULLIF(?, '') WHERE id = ?`,
+// the manifest path or an error message. It only updates rows that have not
+// been logically deleted and reports whether a row was actually updated so
+// callers can detect files that were deleted concurrently.
+func (store *Store) UpdateStatus(ctx context.Context, id, status, manifestPath, errorMessage string) (bool, error) {
+	result, err := store.database.ExecContext(ctx,
+		`UPDATE files SET status = ?, manifest_path = NULLIF(?, ''), error_message = NULLIF(?, '') WHERE id = ? AND deleted_at IS NULL`,
 		status, manifestPath, errorMessage, id,
 	)
 	if err != nil {
-		return fmt.Errorf("update file status: %w", err)
+		return false, fmt.Errorf("update file status: %w", err)
 	}
-	return nil
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("update file status rows: %w", err)
+	}
+	return count == 1, nil
+}
+
+// MarkDeleted logically deletes a file owned by the given tenant by setting
+// deleted_at. It reports whether a row was actually marked so callers can
+// detect files that were already deleted or never existed.
+func (store *Store) MarkDeleted(ctx context.Context, id, tenantID string) (bool, error) {
+	result, err := store.database.ExecContext(ctx,
+		"UPDATE files SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL",
+		store.now().Unix(), id, tenantID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark file deleted: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("mark file deleted rows: %w", err)
+	}
+	return count == 1, nil
 }
 
 // Delete removes a file owned by the given tenant and reports whether a row

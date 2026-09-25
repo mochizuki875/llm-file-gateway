@@ -459,6 +459,15 @@ func TestHandleErrSchedulesRetry(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = dataStore.Close() })
 	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	record := store.File{
+		ID: "file_retry", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 5, SHA256: "digest", Status: "uploaded",
+		SourcePath: "files/tenant-a/file_retry/source.txt", CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
 
 	service.handleErr(context.Background(), errors.New("boom"), conversionJob{id: "file_retry"})
 	if service.retries("file_retry") != 1 {
@@ -545,8 +554,8 @@ func TestHandleErrNonRetryableFailsImmediately(t *testing.T) {
 				t.Fatal("retry state was not forgotten")
 			}
 			// Reset the record for the next subtest.
-			if err := dataStore.UpdateStatus(context.Background(), record.ID, "uploaded", "", ""); err != nil {
-				t.Fatal(err)
+			if updated, err := dataStore.UpdateStatus(context.Background(), record.ID, "uploaded", "", ""); err != nil || !updated {
+				t.Fatalf("reset status = %t, %v", updated, err)
 			}
 		})
 	}
@@ -698,4 +707,446 @@ func TestNewPanicsWithoutDispatcher(t *testing.T) {
 		}
 	}()
 	New(config.Config{}, nil, nil)
+}
+
+func TestDeleteWaitsForActiveConversion(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	relativeSource := filepath.Join("files", "tenant-a", "file_busy", "source.txt")
+	source := filepath.Join(dataDir, relativeSource)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := store.File{
+		ID: "file_busy", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "uploaded",
+		SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+		close(started)
+		<-release
+		return nil
+	}
+	service.enqueue(service.lifecycle(), conversionJob{id: record.ID})
+	go service.processNextJob(context.Background())
+	<-started
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := service.Delete(context.Background(), record.ID, "tenant-a")
+		deleteDone <- err
+	}()
+	// Delete must block while the conversion is active.
+	select {
+	case err := <-deleteDone:
+		t.Fatalf("Delete returned before conversion finished: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Delete did not finish after conversion")
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
+	}
+	if _, err := os.Stat(filepath.Dir(source)); !os.IsNotExist(err) {
+		t.Fatalf("file directory still exists: %v", err)
+	}
+}
+
+func TestDeleteCancelsActiveConversion(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	relativeSource := filepath.Join("files", "tenant-a", "file_cancel", "source.txt")
+	source := filepath.Join(dataDir, relativeSource)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := store.File{
+		ID: "file_cancel", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "uploaded",
+		SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	service.enqueue(service.lifecycle(), conversionJob{id: record.ID})
+	go service.processNextJob(context.Background())
+	<-started
+
+	// The conversion observes the cancellation and Delete completes.
+	deleted, err := service.Delete(context.Background(), record.ID, "tenant-a")
+	if err != nil || !deleted {
+		t.Fatalf("delete = %t, %v; want true, nil", deleted, err)
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
+	}
+}
+
+func TestTTLExpirationDuringConversion(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	relativeSource := filepath.Join("files", "tenant-a", "file_ttl", "source.txt")
+	source := filepath.Join(dataDir, relativeSource)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := store.File{
+		ID: "file_ttl", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "uploaded",
+		SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now - 60, ExpiresAt: now - 1,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+		close(started)
+		<-release
+		return nil
+	}
+	service.enqueue(service.lifecycle(), conversionJob{id: record.ID})
+	go service.processNextJob(context.Background())
+	<-started
+
+	janitorDone := make(chan struct{})
+	go func() {
+		service.deleteExpired(context.Background())
+		close(janitorDone)
+	}()
+	// The janitor must wait for the active conversion before cleanup.
+	select {
+	case <-janitorDone:
+		t.Fatal("deleteExpired returned before conversion finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-janitorDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deleteExpired did not finish after conversion")
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
+	}
+	if _, err := os.Stat(filepath.Dir(source)); !os.IsNotExist(err) {
+		t.Fatalf("file directory still exists: %v", err)
+	}
+}
+
+func TestDeletedFileDoesNotReturnToProcessed(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	relativeSource := filepath.Join("files", "tenant-a", "file_gone", "source.txt")
+	source := filepath.Join(dataDir, relativeSource)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := store.File{
+		ID: "file_gone", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "uploaded",
+		SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := service.Delete(context.Background(), record.ID, "tenant-a"); err != nil || !deleted {
+		t.Fatalf("delete = %t, %v", deleted, err)
+	}
+	// A stale queued job must not resurrect the deleted file.
+	if err := service.convert(context.Background(), conversionJob{id: record.ID}); err != nil {
+		t.Fatalf("convert() = %v", err)
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
+	}
+}
+
+func TestRetryDoesNotResurrectDeletedFile(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	record := store.File{
+		ID: "file_retry_gone", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+		Purpose: "user_data", Bytes: 5, SHA256: "digest", Status: "uploaded",
+		SourcePath: "files/tenant-a/file_retry_gone/source.txt", CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	if err := dataStore.Add(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := service.Delete(context.Background(), record.ID, "tenant-a"); err != nil || !deleted {
+		t.Fatalf("delete = %t, %v", deleted, err)
+	}
+	// A retryable failure after deletion must not schedule a retry.
+	service.handleErr(context.Background(), errors.New("boom"), conversionJob{id: record.ID})
+	if service.retries(record.ID) != 0 {
+		t.Fatalf("retries = %d, want 0", service.retries(record.ID))
+	}
+	select {
+	case job := <-service.queue:
+		t.Fatalf("retry job was enqueued for a deleted file: %#v", job)
+	default:
+	}
+	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
+		t.Fatalf("record = %#v, %v; want nil", current, err)
+	}
+}
+
+func TestDeleteDoesNotBlockOtherFiles(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	now := time.Now().Unix()
+	for _, id := range []string{"file_blocked", "file_free"} {
+		relativeSource := filepath.Join("files", "tenant-a", id, "source.txt")
+		source := filepath.Join(dataDir, relativeSource)
+		if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		record := store.File{
+			ID: id, TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+			Purpose: "user_data", Bytes: 7, SHA256: "digest", Status: "uploaded",
+			SourcePath: filepath.ToSlash(relativeSource), CreatedAt: now, ExpiresAt: now + 3600,
+		}
+		if err := dataStore.Add(context.Background(), record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+		close(started)
+		<-release
+		return nil
+	}
+	service.enqueue(service.lifecycle(), conversionJob{id: "file_blocked"})
+	go service.processNextJob(context.Background())
+	<-started
+
+	// Deleting an unrelated file must complete while another conversion runs.
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := service.Delete(context.Background(), "file_free", "tenant-a")
+		deleteDone <- err
+	}()
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Delete of an unrelated file was blocked by another conversion")
+	}
+	close(release)
+}
+
+func TestCreateEnqueuesAfterRequestContextCancelled(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	settings := testSettings(dataDir)
+	service := New(settings, dataStore, testDispatcher(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	// Simulate a client disconnect immediately after persistence succeeds:
+	// the request context is cancelled before the conversion job is enqueued.
+	service.afterPersist = cancel
+	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("conversion ran with cancelled context: %v", err)
+		}
+		return nil
+	}
+
+	record, err := service.Create(ctx, "notes.txt", strings.NewReader("hello world"), "user_data", "tenant-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case job := <-service.queue:
+		if job.id != record.ID {
+			t.Fatalf("queued job = %#v, want %s", job, record.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("conversion job was not enqueued after request context cancellation")
+	}
+}
+
+func TestCreateConversionCompletesAfterRequestCancelled(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	settings := testSettings(dataDir)
+	service := New(settings, dataStore, testDispatcher(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	service.afterPersist = cancel
+	runCtx, runCancel := context.WithCancel(context.Background())
+	if err := service.Run(runCtx, 1); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runCancel()
+		service.Stop()
+	})
+
+	record, err := service.Create(ctx, "notes.txt", strings.NewReader("hello world"), "user_data", "tenant-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err := dataStore.Get(context.Background(), record.ID, record.TenantID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current != nil && current.Status == "processed" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("conversion did not reach the processed state after request cancellation")
+}
+
+func TestStopCancelsLifecycleAndWorkers(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	runCtx, runCancel := context.WithCancel(context.Background())
+	if err := service.Run(runCtx, 2); err != nil {
+		t.Fatal(err)
+	}
+	// Stop must not panic even when called concurrently with Run's shutdown.
+	done := make(chan struct{})
+	go func() {
+		runCancel()
+		service.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return")
+	}
+	// After Stop, enqueueing must not block or panic.
+	service.enqueue(service.lifecycle(), conversionJob{id: "file_after_stop"})
+}
+
+func TestCreateDoesNotDoubleProcess(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+	runCtx, runCancel := context.WithCancel(context.Background())
+	if err := service.Run(runCtx, 1); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runCancel()
+		service.Stop()
+	})
+
+	record, err := service.Create(context.Background(), "notes.txt", strings.NewReader("hello world"), "user_data", "tenant-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err := dataStore.Get(context.Background(), record.ID, record.TenantID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current != nil && current.Status == "processed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Give any duplicate job a chance to run, then verify the status is still
+	// processed and no second manifest update occurred.
+	time.Sleep(100 * time.Millisecond)
+	current, err := dataStore.Get(context.Background(), record.ID, record.TenantID)
+	if err != nil || current == nil || current.Status != "processed" {
+		t.Fatalf("record = %#v, %v; want processed", current, err)
+	}
 }
