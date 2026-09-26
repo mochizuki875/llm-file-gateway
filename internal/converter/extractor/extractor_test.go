@@ -58,9 +58,9 @@ func TestReadUTF8MissingFile(t *testing.T) {
 	}
 }
 
-func TestCSVJoinsRecordsWithTabs(t *testing.T) {
+func TestExtractCSVJoinsRecordsWithTabs(t *testing.T) {
 	source := writeSource(t, "records.csv", []byte("name,value\nanswer,\"4,821\"\n"))
-	text, err := CSV(source)
+	text, err := ExtractCSV(source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,25 +69,25 @@ func TestCSVJoinsRecordsWithTabs(t *testing.T) {
 	}
 }
 
-func TestCSVRejectsMalformedInput(t *testing.T) {
+func TestExtractCSVRejectsMalformedInput(t *testing.T) {
 	source := writeSource(t, "broken.csv", []byte("a,b\n\"unterminated"))
-	if _, err := CSV(source); err == nil || !strings.Contains(err.Error(), "malformed") {
+	if _, err := ExtractCSV(source); err == nil || !strings.Contains(err.Error(), "malformed") {
 		t.Fatalf("error = %v, want malformed CSV error", err)
 	}
 }
 
-func TestCSVRejectsInvalidUTF8(t *testing.T) {
+func TestExtractCSVRejectsInvalidUTF8(t *testing.T) {
 	source := writeSource(t, "binary.csv", []byte{0xff, 0xfe})
-	if _, err := CSV(source); err == nil {
+	if _, err := ExtractCSV(source); err == nil {
 		t.Fatal("invalid UTF-8 CSV succeeded")
 	}
 }
 
-func TestHTMLExtractsVisibleText(t *testing.T) {
+func TestExtractHTMLExtractsVisibleText(t *testing.T) {
 	source := writeSource(t, "page.html", []byte(
 		"<html><head><title>hidden</title></head><body><h1>Report</h1><p>Hello <b>world</b>.</p><script>bad()</script><style>.x{}</style><template>t</template></body></html>",
 	))
-	text, err := HTML(source)
+	text, err := ExtractHTML(source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,9 +96,9 @@ func TestHTMLExtractsVisibleText(t *testing.T) {
 	}
 }
 
-func TestHTMLNormalizesWhitespace(t *testing.T) {
+func TestExtractHTMLNormalizesWhitespace(t *testing.T) {
 	source := writeSource(t, "spaces.html", []byte("<p>  a   b  </p><p>c</p>"))
-	text, err := HTML(source)
+	text, err := ExtractHTML(source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,9 +107,9 @@ func TestHTMLNormalizesWhitespace(t *testing.T) {
 	}
 }
 
-func TestHTMLRejectsInvalidUTF8(t *testing.T) {
+func TestExtractHTMLRejectsInvalidUTF8(t *testing.T) {
 	source := writeSource(t, "binary.html", []byte{0xff, 0xfe})
-	if _, err := HTML(source); err == nil {
+	if _, err := ExtractHTML(source); err == nil {
 		t.Fatal("invalid UTF-8 HTML succeeded")
 	}
 }

@@ -552,6 +552,26 @@ func TestCreateRejectsInvalidContent(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsUnknownBinaryAsUnsupportedFileType(t *testing.T) {
+	dataDir := t.TempDir()
+	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+
+	zipHeader := []byte{'P', 'K', 3, 4, 0, 0xff}
+	_, err = service.Create(context.Background(), "archive.zip", bytes.NewReader(zipHeader), "user_data", "tenant-a", time.Minute)
+	var gatewayError *apierror.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Status != 400 || gatewayError.Code != "unsupported_file_type" || gatewayError.Message != "unsupported file type" {
+		t.Fatalf("error = %#v, want unsupported file type", gatewayError)
+	}
+	if paths, err := dataStore.SourcePaths(context.Background()); err != nil || len(paths) != 0 {
+		t.Fatalf("persisted paths = %v, %v; want none", paths, err)
+	}
+}
+
 func TestCreateSanitizesFilename(t *testing.T) {
 	dataDir := t.TempDir()
 	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))

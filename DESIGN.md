@@ -50,7 +50,7 @@ GatewayはFiles APIに送信された変換前のファイルと`file_id`を直�
 
 | Component | Responsibility |
 | --- | --- |
-| `server.go` | route、Files API、tenant認証、共通response |
+| `server.go` | route、Files API、認証、共通response |
 | `inference.go` | Responses/Chatのrequest検証とcontent展開 |
 | `document.go` | file参照の解決、一時変換、content part生成 |
 | `file_url.go` | 公開HTTPS URLの検証、redirect、download |
@@ -68,13 +68,11 @@ type DocumentConverter interface {
 }
 ```
 
-- RegistryはConverterの一覧を保持し、Dispatcherは形式別条件分岐を持たず適切なConverterの選択を行う。
-- 検証と変換はDispatcherが選択したConverterで行う。
-- 各Converterは拡張子ごとの検証(`Validate`)と変換(`Convert`)を所有する。
+- RegistryはConverterの一覧を保持し、Dispatcherはファイル形式に応じたConverterを選択する。
+- 各Converterは拡張子ごとの検証(`Validate`)と変換(`Convert`)を所有し、ファイル形式に応じた検証、変換を行う。
 - Converterは、PDF、Office、画像など専用処理が必要な形式のConverterと、NUL byteなしのUTF-8形式を扱う共通`textConverter`で構成する。
 - PDFとOffice形式ファイルのテキスト抽出および画像変換は[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)へ委譲する。
 - テキストファイルなどUTF-8形式でNUL byteを含まないファイルは、ファイル形式に対応するExtractorで抽出処理を行なった後、共通の`textConverter`で処理される。
-
 - `textConverter`は`extractor.Extractor`関数型(`func(string) (string, error)`)を保持し、`Validate`と`Convert`の両方で同じextractorを呼び出す。
 
 ```go
@@ -84,17 +82,18 @@ package extractor
 type Extractor func(string) (string, error)
 ```
 
-- extractorは`extractor`パッケージに実装し、`readUTF8`でUTF-8とNUL byteを検証した上で、形式固有のテキスト抽出を行う。
+- Extractorは`extractor`パッケージに実装し、`readUTF8`でUTF-8とNUL byteを検証した上で、形式固有のテキスト抽出を行う。
   - `extractor.PlainText`は`readUTF8`のみで内容をそのまま返す。
-  - `extractor.CSV`はCSVをパースし、各レコードをタブ区切りに変換して改行で結合する。
-  - `extractor.HTML`はHTMLをパースし、`head`/`script`/`style`/`template`を除外して可視テキストを抽出する。
-- Converterでの処理結果は`convertRenderedDocument`、`convertTextDocument`、`convertImageDocument`へ渡され、共通変換処理でartifactとmanifestが生成される。
+  - 形式固有のExtractorは`Extract<Format>`と命名する。`extractor.ExtractCSV`はCSVをパースし、各レコードをタブ区切りに変換して改行で結合する。
+  - `extractor.ExtractHTML`はHTMLをパースし、`head`/`script`/`style`/`template`を除外して可視テキストを抽出する。
+- Converterでの処理結果は`convertRenderedDocument`、`convertTextDocument`、`convertImageDocument`へ渡され、artifactとmanifestが生成される。
 
 #### Converterのライフサイクル
 
-- `Registry.Converter`は拡張子ごとの`ConverterFactory`を**解決のたびに呼び出し**、新しい`DocumentConverter`インスタンスを生成する。in-treeのconverterはすべてステートレス（`ConverterConfig`のみを保持し、変換ごとに独立して動作する）ため、この設計は意図的なものである。
-- ステートフルなリソース（接続プール、キャッシュ、一時ファイル等）を保持するout-of-tree converterは、factory内でリソースを生成し、`Convert`終了時に自ら解放する必要がある。factoryが返すconverterのライフサイクル管理はconverter実装者の責務であり、Registry/Dispatcherはconverterを再利用しない。
-- `Registry.Converter`は未登録拡張子に対して`ErrConverterNotFound`を返す。`Dispatcher.ResolveConverter`は`errors.Is`でこのエラーを判定し、**未登録拡張子のみ**`text/plain`のfallbackへ委譲する。factoryが返すエラー（初期化失敗等）はfallbackで握りつぶさず、そのまま呼び出し元へ伝播する。
+- `Registry.Converter`は拡張子ごとの`ConverterFactory`を解決のたびに呼び出し、新しい`DocumentConverter`インスタンスを生成する。in-treeのconverterはすべてステートレスである（`ConverterConfig`のみを保持し、変換ごとに独立して動作する）。
+- ステートフルなリソース（接続プール、キャッシュ、一時ファイル等）を保持するout-of-tree converterは、factory内でリソースを生成し、`Convert`終了時に自ら解放する必要がある。factoryが返すconverterのライフサイクル管理はconverterの責務であり、Registry/Dispatcherはconverterを再利用しない。
+- `Registry.Converter`は未登録拡張子に対して`ErrConverterNotFound`を返す。`Dispatcher.ResolveConverter`は`errors.Is`でこのエラーを判定し、未登録拡張子を`text/plain`のfallbackへ委譲する。
+- factoryが返すエラー（初期化失敗等）は呼び出し元へ伝播する。
 
 ```mermaid
 flowchart LR
@@ -151,8 +150,8 @@ flowchart LR
 
   subgraph Extractors[Extractors]
     Plain[PlainText]
-    CSV[CSV]
-    HTML[HTML]
+    CSV[ExtractCSV]
+    HTML[ExtractHTML]
   end
 
   V --> C[Convert]
@@ -166,43 +165,44 @@ flowchart LR
 | `types.go` | `Options`、`Artifact`、`Manifest`、`Result` |
 | `errors.go` | `PageLimitError`/`TextLimitError`と`IsRetryable` |
 | `registry.go` | `Registry`（登録・拡張子の正規化・検索）、`ConverterConfig`/`ConverterHandle`/`ConverterFactory`、`NewInTreeRegistry` |
-| `dispatcher.go` | pathからconverterを解決し、未知拡張子は共通text converter（plain text fallback）へ委譲 |
+| `dispatcher.go` | ファイル形式に応じたConverterの解決 |
 | `converter.go` | rendered/text/imageの共通変換処理 |
 | `util.go` | 共通のファイル操作・manifest生成・出力ディレクトリ管理・文字数上限 |
-| `<extension>.go` | PDF、Office、画像など専用処理が必要な形式のconverter |
-| `office_common.go` | Office converterが共有するsignature（ZIP/OLE） |
-| `text_common.go` | 全テキスト形式のconverter（`textConverter`/`newTextConverter`） |
-| `extractor/` | テキスト形式固有のextractor（plain text、CSV、HTML） |
-| `image_common.go` | image converterが共有するdecodeとconversion helper |
+| `<extension>.go` | PDF、Office、画像などファイル形式に応じたConverter |
+| `office_common.go` | Office Converterが共有するsignature（ZIP/OLE） |
+| `text_common.go` | テキスト形式のConverter |
+| `extractor/` | テキスト形式固有のExtractor（plain text、CSV、HTML） |
+| `image_common.go` | Image Converterが共有するdecodeとconversion helper |
 | `validation.go` | signature検証の共通部品 |
 
 ### Adding a Format
 
-新しいファイル形式に対応するには、`DocumentConverter`を実装してRegistryへ登録する。形式がUTF-8テキスト系ならExtractorを追加するだけでよく、PDF/Office/画像のような専用処理が必要な形式はConverterを新規実装する。
+新しいファイル形式に対応する場合は、`DocumentConverter`を実装してRegistryへ登録する。形式がUTF-8テキスト系ならExtractorを追加するだけでよく、PDF/Office/画像のような専用処理が必要な形式はConverterを新規実装する。
 
-#### 1. 形式の分類を決める
+以下の例で使う`format`、`Format`、`.format`、`application/format`は任意の形式名、拡張子、MIME typeを表すプレースホルダーである。実装時は対象形式に合わせて置き換える。
 
 | 分類 | 実装方法 | 例 |
 | --- | --- | --- |
 | UTF-8テキスト系 | `extractor`パッケージにExtractorを追加し、`newTextConverter`で登録 | `.md`、`.csv`、`.html` |
 | 画像 | `image_common.go`の`validateImage`/`convertImage`を利用 | `.jpg`、`.png` |
 | レンダリング系 | `convertRenderedDocument`を利用（`document-image-renderer`へ委譲） | `.pdf`、Office形式 |
-| その他（独自処理） | `DocumentConverter`を直接実装 | 将来の専用形式 |
+| その他（独自処理） | `DocumentConverter`を直接実装 | in-tree Converterでサポートされない形式 |
 
-#### 2. テキスト系形式の追加（Extractor）
+#### テキスト系形式の追加（Extractor）
 
 `internal/converter/extractor/`に`<format>.go`を追加する。Extractorは`func(string) (string, error)`型で、必ず`readUTF8`でUTF-8とNUL byteを検証してから形式固有の抽出を行う。
 
 ```go
 package extractor
 
-// JSON extracts the visible content of a JSON file.
-func JSON(source string) (string, error) {
+// ExtractFormat extracts the visible content of a Format file.
+func ExtractFormat(source string) (string, error) {
     text, err := readUTF8(source)
     if err != nil {
         return "", err
     }
-    // 形式固有の抽出処理
+    // Extraction for file format
+    // ...
     return extracted, nil
 }
 ```
@@ -210,10 +210,10 @@ func JSON(source string) (string, error) {
 `internal/converter/text_common.go`の`newTextConverter`で登録する。拡張子は小文字で`.`から始める。
 
 ```go
-newTextConverter(".json", "application/json", extractor.JSON),
+newTextConverter(".format", "application/format", extractor.ExtractFormat),
 ```
 
-#### 3. 専用Converterの追加
+#### 専用Converterの追加
 
 `internal/converter/`に`<extension>.go`を追加し、`DocumentConverter`の4メソッドを実装する。
 
@@ -222,26 +222,21 @@ package converter
 
 import (
     "context"
-
-    "github.com/mochizuki875/llm-file-gateway/internal/converter/extractor"
 )
 
-type jsonConverter struct{}
+// format is a placeholder for the target format name.
+type formatConverter struct{}
 
-func (jsonConverter) Extension() string { return ".json" }
+func (formatConverter) Extension() string { return ".format" }
 
-func (jsonConverter) MediaType() string { return "application/json" }
+func (formatConverter) MediaType() string { return "application/format" }
 
-func (jsonConverter) Validate(source string) error {
+func (formatConverter) Validate(source string) error {
     return validateSignature(source, []byte("{"))
 }
 
-func (documentConverter jsonConverter) Convert(ctx context.Context, source, outputDir string, options Options) (Result, error) {
-    text, err := extractor.JSON(source)
-    if err != nil {
-        return Result{}, err
-    }
-    return convertTextDocument(source, outputDir, documentConverter.MediaType(), []string{text}, options)
+func (documentConverter formatConverter) Convert(ctx context.Context, source, outputDir string, options Options) (Result, error) {
+  // Convert logic for the target format.
 }
 ```
 
@@ -249,22 +244,20 @@ func (documentConverter jsonConverter) Convert(ctx context.Context, source, outp
 - `Convert`は共通変換処理へ委譲する。テキストは`convertTextDocument`、画像は`convertImage`、レンダリング系は`convertRenderedDocument`を使う。
 - 変換結果のartifactとmanifest生成は共通変換処理が行うため、Converter側で`manifest.json`を直接書かない。
 
-#### 4. Registryへの登録
-
-`internal/converter/registry.go`の`NewInTreeRegistry`に追加する。拡張子の重複登録はエラーになるため、既存の登録と衝突しないこと。
+`internal/converter/registry.go`の`NewInTreeRegistry`に新規で実装したConverterを追加する。拡張子の重複登録はエラーになるため、既存の登録と衝突しないこと。
 
 ```go
 func NewInTreeRegistry() Registry {
     return Registry{
         // ...existing...
-        ".json": ConverterAdapter(func(config ConverterConfig) DocumentConverter {
-            return newTextConverter(".json", "application/json", extractor.JSON)
+        ".format": ConverterAdapter(func(config ConverterConfig) DocumentConverter {
+            return newTextConverter(".format", "application/format", extractor.ExtractFormat)
         }),
     }
 }
 ```
 
-#### 5. テスト
+#### テスト
 
 - `internal/converter/registry_test.go`の`TestInTreeRegistryContainsSupportedFormats`に拡張子を追加する。
 - `internal/converter/text_common_test.go`の`TestTextConverters`にテキスト系のケースを追加する。
@@ -274,11 +267,15 @@ func NewInTreeRegistry() Registry {
 #### 注意点
 
 - 拡張子はRegistryで小文字に正規化されるが、登録時は小文字で統一する。
-- 未知拡張子はDispatcherが`text/plain`のfallbackへ委譲するため、テキスト系以外の形式を追加する場合は必ずRegistryへ登録する。
+- 未知の拡張子はDispatcherが`text/plain`のfallbackへ委譲するため、テキスト系以外の形式を追加する場合は必ずRegistryへ登録する。
 - 文字数上限（`MaxTextChars`）とページ数上限（`MaxPages`）は共通変換処理で適用される。`MaxPages`は`0`で無制限を意味し、rendererへは`RenderOptions.MaxPages`として渡される。`MaxTextChars`も`0`で無制限を意味し、rendererへは`ExtractOptions.MaxCharacters`として渡される。Converter側で独自に制限を追加する場合は`TextLimitError`/`PageLimitError`を返す。
 - 変換中に`outputDir`を直接操作しない。共通変換処理が`derived` directoryと`manifest.json`の初期化・後処理を担う。
 
 ## File Lifecycle
+
+### 状態遷移
+
+Files APIは保存後に`uploaded`を返す。workerは変換開始時に`processing`へ、manifestの永続化後に`processed`へ更新する。変換に失敗した場合は`failed`へ更新する。削除はどの状態からも`deleted`へ遷移する。
 
 ```mermaid
 stateDiagram-v2
@@ -292,7 +289,25 @@ stateDiagram-v2
   failed --> deleted
 ```
 
-Files APIは保存後に`uploaded`を返す。`CONVERSION_WORKERS`個のworkerが変換し、manifestを永続化して`processed`へ更新する。worker数の既定値は2で、正の整数に変更できる。保持期限は作成時刻から`expires_after.seconds`後とし、未指定時は`FILE_TTL_SECONDS`（既定300秒）を使用する。`FILE_TTL_SECONDS`は`0`で無制限を意味し、その場合は内部的に`expires_at=0`として保存され、FileObjectでは`null`を返す。`expires_after`は`anchor=created_at`と1秒以上`FILE_TTL_SECONDS`以下の秒数を要求する（`FILE_TTL_SECONDS=0`の場合は任意の正の秒数）。Gatewayの再起動時には、SQLiteに残っている有効期限内の`uploaded`または`processing`状態のfile IDを変換queueへ追加し、変換を最初から再実行する。また、SQLiteの全recordが参照するsource directoryと`files/`配下を照合し、DB recordを持たないGateway形式のfile directoryだけを削除する。永続file directory、request temporary directory、derived directoryは`0700`、source、derived artifact、manifestは`0600`で新規作成する。janitorは期限切れレコードと関連directoryを物理削除し、成功をDEBUG levelで記録する。
+### 登録と非同期変換
+
+- queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworker goroutineが共有する。worker数の既定値は2で、正の整数に変更できる。
+- 新規uploadでは最初に解決した`DocumentConverter`を`file_id`とともにqueueへ追加する。workerはconverterを再解決しない。
+
+### 起動時の復旧
+
+- Gatewayの再起動時は、SQLiteに残る有効期限内の`uploaded`または`processing`状態の`file_id`をqueueへ追加し、変換を最初から再実行する。
+- SQLiteの全recordが参照するsource directoryと`files/`配下を照合し、DB recordを持たないGateway形式のfile directoryだけを削除する。
+
+### 保持期限と削除
+
+- 保持期限は作成時刻から`expires_after.seconds`後とし、未指定時は`FILE_TTL_SECONDS`（既定300秒）を使用する。
+- janitor goroutineは30秒ごとに期限切れfileを確認し、期限切れレコードと関連directoryを物理削除する。削除の成功はDEBUG levelで記録する。
+
+### 保存権限と停止
+
+- 永続file directory、request temporary directory、derived directoryは`0700`、source、derived artifact、manifestは`0600`で新規作成する。
+- 停止時は共通contextをcancelし、すべてのgoroutineの終了を待つ。
 
 ```mermaid
 sequenceDiagram
@@ -319,8 +334,6 @@ sequenceDiagram
   Convert-->>Worker: manifest + artifacts
   Worker->>Store: status=processed
 ```
-
-queueはprocess内のbuffered channelであり、`CONVERSION_WORKERS`個のworker goroutineが共有する。新規uploadでは最初に解決した`DocumentConverter`をfile IDとともにqueueへ追加し、workerで再解決しない。起動時はSQLiteから有効期限内の`uploaded`または`processing`状態のfile IDを取得してqueueへ追加し、source pathからconverterを一度解決して変換を最初から再実行する。workerとは別のjanitor goroutineが30秒ごとに期限切れfileを削除する。停止時は共通contextをcancelし、すべてのgoroutineの終了を待つ。
 
 ## Conversion
 

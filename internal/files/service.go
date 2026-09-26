@@ -276,6 +276,9 @@ func (service *Service) Create(ctx context.Context, filename string, source io.R
 		return nil, apierror.FileTooLarge(service.settings.MaxFileBytes, "file")
 	}
 	if err := documentConverter.Validate(sourcePath); err != nil {
+		if documentConverter.Extension() == "" {
+			return nil, apierror.New(400, "unsupported_file_type", "unsupported file type", "file")
+		}
 		return nil, apierror.New(400, "unsupported_file_type", err.Error(), "file")
 	}
 	now := time.Now().Unix()

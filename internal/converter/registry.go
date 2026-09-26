@@ -155,9 +155,15 @@ func NewInTreeRegistry() Registry {
 		".markdown": ConverterAdapter(func(ConverterConfig) DocumentConverter {
 			return newTextConverter(".markdown", "text/markdown", extractor.PlainText)
 		}),
-		".csv":  ConverterAdapter(func(ConverterConfig) DocumentConverter { return newTextConverter(".csv", "text/csv", extractor.CSV) }),
-		".html": ConverterAdapter(func(ConverterConfig) DocumentConverter { return newTextConverter(".html", "text/html", extractor.HTML) }),
-		".htm":  ConverterAdapter(func(ConverterConfig) DocumentConverter { return newTextConverter(".htm", "text/html", extractor.HTML) }),
+		".csv": ConverterAdapter(func(ConverterConfig) DocumentConverter {
+			return newTextConverter(".csv", "text/csv", extractor.ExtractCSV)
+		}),
+		".html": ConverterAdapter(func(ConverterConfig) DocumentConverter {
+			return newTextConverter(".html", "text/html", extractor.ExtractHTML)
+		}),
+		".htm": ConverterAdapter(func(ConverterConfig) DocumentConverter {
+			return newTextConverter(".htm", "text/html", extractor.ExtractHTML)
+		}),
 		".jpg":  ConverterAdapter(func(ConverterConfig) DocumentConverter { return jpgConverter{} }),
 		".jpeg": ConverterAdapter(func(ConverterConfig) DocumentConverter { return jpegConverter{} }),
 		".png":  ConverterAdapter(func(ConverterConfig) DocumentConverter { return pngConverter{} }),

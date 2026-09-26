@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// CSV parses a CSV file and joins each record with tabs.
-func CSV(source string) (string, error) {
+// ExtractCSV parses a CSV file and joins each record with tabs.
+func ExtractCSV(source string) (string, error) {
 	text, err := readUTF8(source)
 	if err != nil {
 		return "", err

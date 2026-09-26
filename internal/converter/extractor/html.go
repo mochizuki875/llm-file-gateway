@@ -6,8 +6,8 @@ import (
 	"golang.org/x/net/html"
 )
 
-// HTML parses an HTML file and returns its visible text.
-func HTML(source string) (string, error) {
+// ExtractHTML parses an HTML file and returns its visible text.
+func ExtractHTML(source string) (string, error) {
 	text, err := readUTF8(source)
 	if err != nil {
 		return "", err

@@ -2170,6 +2170,42 @@ func TestCreateFileRequiresPurposeWithoutSideEffects(t *testing.T) {
 	}
 }
 
+func TestCreateFileRejectsZipAsUnsupportedFileType(t *testing.T) {
+	settings, dataStore, service := testDependencies(t)
+	handler := NewHandler(settings, dataStore, service)
+	body := &bytes.Buffer{}
+	form := multipart.NewWriter(body)
+	file, err := form.CreateFormFile("file", "archive.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = file.Write([]byte{'P', 'K', 3, 4, 0, 0xff})
+	_ = form.WriteField("purpose", "user_data")
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Param   string `json:"param"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "unsupported_file_type" || result.Error.Message != "unsupported file type" || result.Error.Param != "file" {
+		t.Fatalf("error = %#v", result.Error)
+	}
+}
+
 func testDependencies(t *testing.T) (config.Config, *store.Store, *files.Service) {
 	t.Helper()
 	dataDir := t.TempDir()

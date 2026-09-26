@@ -3,8 +3,8 @@
 ![](images/logo.png)
 
 [vLLMのAPI](https://docs.vllm.ai/en/stable/serving/online_serving/)に対して[OpenAI Files API](https://developers.openai.com/api/reference/resources/files)との互換性を持たせるGatewayです。
-PDF、Officeファイル、テキスト、画像などのファイルをOpenAI Files API互換のAPIでアップロードすると画像変換およびテキスト抽出が行われ、`file_id`が生成されます。
-生成された`file_id`をResponses APIまたはChat Completions APIに付加することで、バックエンドにFiles APIでアップロードしたファイルから変換された画像(base64)および抽出テキストを転送することができます。
+PDF、Officeファイル、テキスト、画像などのファイルをOpenAI Files API互換のAPIでアップロードすると画像変換およびテキスト抽出が行われ、アーティファクトとして保存されます。アーティファクトを生成する際に`file_id`が発行されます。
+`file_id`をResponses APIまたはChat Completions APIに付加することで、バックエンドにFiles APIでアップロードしたファイルに基づくアーティファクトを画像(base64)および抽出テキストとして転送することができます。
 
 ファイル画像変換には[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)を使用します。
 
@@ -14,13 +14,13 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 - `GATEWAY_API_KEY`によるGatewayでのToken認証
 
 ## Limitations
-- 複数の`GATEWAY_API_KEY`による認証(マルチテナント)には未対応です。
-- HTMLやMarkdownにおける外部URLや埋め込み画像は取得しません。
-- Officeファイルのフォントやレイアウト、改ページの完全な再現は保証しません。
-- GatewayはステートフルなAll-in-One構成になっているため、複数インスタンスによるスケーリングには対応していません。
-- OpenAI Files APIのファイル変換、token使用量、回答品質との完全な一致は保証しません。
-- Responses APIの`input_file.detail`は受理しますが、`low`/`high`の変換品質には反映しません。ファイルは常にGatewayの既定の変換設定で処理され、モデルには`detail: "auto"`の画像として転送されます。
-- LLM File GatewayはOpenAI Files APIとの互換性を持たせることを目的としているため、一般的なGatewayに期待されるrate limit、request size制限などの機能は含まれていません。
+- 複数の`GATEWAY_API_KEY`による認証(マルチテナント)には未対応です
+- HTMLやMarkdownにおける外部URLや埋め込み画像は取得しません
+- Officeファイルのフォントやレイアウト、改ページの完全な再現は保証しません
+- GatewayはステートフルなAll-in-One構成になっているため、複数インスタンスによるスケーリングには対応していません
+- OpenAI Files APIのファイル変換、token使用量、回答品質との完全な一致は保証しません
+- Responses APIの`input_file.detail`は受理しますが、`low`/`high`の変換品質には反映しません(ファイルは常にGatewayの既定の変換設定で処理され、モデルには`detail: "auto"`の画像として転送されます)
+- LLM File GatewayはOpenAI Files APIとの互換性を持たせることを目的としているため、一般的なGatewayに期待されるrate limit、request size制限などの機能は含まれていません
 
 ## Supported APIs
 
@@ -52,7 +52,7 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 | Structured text | `.csv`, `.html`, `.htm` | CSVを行形式に変換、HTMLから可視テキストを抽出し、モデルへの入力として使用 |
 | Image | `.jpeg`, `.jpg`, `.png` | 元形式の画像をそのままモデルへの入力として使用 |
 
-- `DOCUMENT_TEXT_EXTRACTION_ENABLED=false`にすると、PDFとOfficeファイルからのテキスト抽出は行わず、変換画像だけをモデルへ送信します。
+- `DOCUMENT_TEXT_EXTRACTION_ENABLED=false`を設定すると、PDFとOfficeファイルからのテキスト抽出は行わず、変換画像だけをモデルへ送信します。
 - Officeファイルのマクロは実行しません。
 
 ## Requirements
@@ -85,14 +85,14 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 
 | Environment variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `VLLM_MODEL` | Yes | - | クライアント要求で許可するモデル名(vLLMのモデル名と一致する必要があります) |
+| `VLLM_MODEL` | Yes | - | クライアントからのリクエストで許可するモデル名(vLLMのモデル名と一致する必要があります) |
 | `VLLM_BASE_URL` | Yes | - | `/v1`で終わるvLLMのURL |
 | `GATEWAY_HOST` | No | `127.0.0.1` | Gatewayの待受けホスト(全てのネットワークインターフェースで待ち受ける場合は`0.0.0.0`) |
 | `GATEWAY_PORT` | No | `8080` | Gatewayの待受けポート |
 | `GATEWAY_AUTH_REQUIRED` | No | `false` | GatewayでBearer tokenを検証するか |
-| `GATEWAY_API_KEY` | Conditional | - | Gateway用APIキー |
-| `VLLM_API_KEY` | Yes | - | vLLM用APIキー |
-| `GATEWAY_DATA_DIR` | No | `gateway-data` | SQLiteとファイルの保存先 |
+| `GATEWAY_API_KEY` | Conditional | - | Gateway認証用APIキー |
+| `VLLM_API_KEY` | Yes | - | vLLM認証用APIキー |
+| `GATEWAY_DATA_DIR` | No | `gateway-data` | SQLiteとファイルの保存先ディレクトリ |
 | `FILE_TTL_SECONDS` | No | `300` | デフォルトのファイル保持期間(sec)および`expires_after.seconds`で指定可能な上限値（`0`で無制限） |
 | `MAX_FILE_BYTES` | No | `52428800`(50 MiB) | 1ファイルの最大サイズ(bytes)（`0`で無制限） |
 | `MAX_REQUEST_BODY_BYTES` | No | `MAX_FILE_BYTES`の4倍 | 推論リクエスト(`/v1/responses`、`/v1/chat/completions`)のボディ全体の最大サイズ(bytes)。複数の`file_data`を含む場合の合計上限（`0`で無制限） |
@@ -107,12 +107,8 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 - `GATEWAY_AUTH_REQUIRED=true`を設定した場合はGatewayでの認証が有効となり、`GATEWAY_API_KEY`の設定が必須となります。
 - GatewayからvLLMへの認証は`VLLM_API_KEY`を用いて行われるため、Gatewayに送信された`OPENAI_API_KEY`は転送されません。(`VLLM_API_KEY`は常に必須です。)
 - `GET /health`は認証対象外です。
-- Gatewayで受け付けるPDF/Officeの最大ページ数は`MAX_DOCUMENT_PAGES`（`0`で無制限）で制限し、超過した場合はエラーを返します。
-- テキスト抽出時の文字数上限はPDF、Office、すべてのテキスト形式を含めて`MAX_DOCUMENT_TEXT_CHARS`（`0`で無制限）で制限します。
 - `DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合、画像変換に加えてテキスト抽出を行い、両方をバックエンドに送信します。
-- ファイル保持期間(`expires_after.seconds`)の上限は`FILE_TTL_SECONDS`（`0`で無制限）で、未指定の場合は`FILE_TTL_SECONDS`に設定された値が適用されます。
-- `MAX_FILE_BYTES`（`0`で無制限）はアップロード、`file_data`、`file_url`の各ファイルに適用され、`MAX_REQUEST_BODY_BYTES`（`0`で無制限）は推論リクエストのボディ全体に適用されます。
-- `REQUEST_TIMEOUT_SECONDS`（`0`で無制限）はvLLM通信のtimeoutで、streamingではstream全体に適用されます。
+- クライアントが指定するファイル保持期間(`expires_after.seconds`)の上限は`FILE_TTL_SECONDS`（`0`で無制限）です。未指定の場合は`FILE_TTL_SECONDS`に設定された値が適用されます。
 
 ## Running the Gateway
 
@@ -127,7 +123,6 @@ go run ./cmd/llm-file-gateway
 ```
 
 Gatewayにリクエストを送信します。
-`{"status":"ok"}`が返ればGatewayは起動しています。
 
 ```bash
 # Check the health of the Gateway
@@ -158,7 +153,7 @@ docker compose down
 
 ## Usage
 
-クライアントからはGatewayをOpenAI互換APIの接続先として使用します。
+クライアントからGatewayをOpenAI互換APIの接続先として使用します。
 
 環境変数を設定します。
 ```bash
@@ -188,6 +183,7 @@ pip install -r requirements.txt
 
 Pythonスクリプトを実行します。
 ```bash
+# Run the Python script to summarize the uploaded file
 python openai_file_summary.py
 # Streaming response
 python openai_file_summary_stream.py
@@ -236,12 +232,12 @@ curl --fail --silent -X DELETE "$OPENAI_BASE_URL/files/$FILE_ID" \
 | Responses | Uploaded file | `{"type":"input_file","file_id":"file_..."}` |
 | Responses | Inline base64 | `{"type":"input_file","filename":"document.pdf","file_data":"..."}` |
 | Responses | Public URL | `{"type":"input_file","file_url":"https://example.com/document.pdf"}` |
-| Chat Completions | Uploaded file | `{"type":"file","file":{"file_id":"file_..."}}` |
+| Chat Completions (*)| Uploaded file | `{"type":"file","file":{"file_id":"file_..."}}` |
 | Chat Completions | Inline base64 | `{"type":"file","file":{"filename":"document.pdf","file_data":"..."}}` |
 
 一つの参照には`file_id`、`file_data`、`file_url`のいずれか一つだけを指定します。Chat Completionsでは`file_url`を使用できません。
 
-> **Note**: OpenAIのChat Completions APIは`file` inputをサポートしていませんが、LLM File GatewayはChat Completionsでも`file_id`と`file_data`によるファイル参照を拡張として受け付けます。Responses APIと同様に、ファイルは抽出テキストとbase64画像のcontent partへ展開されます。
+> **Note**: OpenAIのChat Completions APIには、ファイルを直接指定するための標準入力形式(*)はありません。LLM File Gatewayでは独自拡張として、Chat Completions APIでも`file_id`または`file_data`によるファイル参照を受け付けます。参照されたファイルはResponses APIと同様に、抽出テキストとbase64画像のcontent partへ展開されます。
 
 ## Testing
 
@@ -251,7 +247,7 @@ make verify
 make test-integration
 ```
 
-`make test`は外部rendererを使うケースを除く短縮testです。`make verify`は同じtestをrace detector付きで実行し、続けて`go vet`と`make lint`（golangci-lint。未インストール時は自動でインストール）を実行します。どちらもvLLMをmockするためGPU serverは不要です。
+`make test`は外部rendererを使うケースを除く短縮testです。`make verify`は同じtestをrace detector付きで実行し、続けて`go vet`と`make lint`を実行します。どちらもvLLMをmockするためGPU serverは不要です。
 
 `make test-integration`はPDF/Officeの実変換を含み、LibreOfficeと必要なフォントが必要です。外部vLLMを使うE2E確認には[Python Client Example](#python-client-example)を使用できます。
 
@@ -259,7 +255,7 @@ make test-integration
 
 - 登録済み拡張子の基本signature、テキストのUTF-8とNUL byte、画像形式を検証します。
 - `file_url`はHTTPSの443番ポートと公開IPだけを許可し、redirectごとに再検証します。
-- 保存ファイルは`FILE_TTL_SECONDS`で設定した保持期間経過後に削除します（`0`の場合は削除されません）。
+- 保存ファイルは`FILE_TTL_SECONDS`で設定した保持期間経過後に削除します。
 - Gateway認証無効時の保存領域は全クライアントで共有されます。
 - ファイル由来のテキストを信頼しないようGatewayでsystem instructionを追加します。
 - ログへファイルに記載された本文やAPI keyを明示的には出力しません。
