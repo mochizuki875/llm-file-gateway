@@ -299,7 +299,7 @@ func TestPDFSampleExtractionAndRendering(t *testing.T) {
 			if result.Artifacts[0].ImagePath == nil {
 				t.Fatal("PDF artifact has no image")
 			}
-			textPath := result.Manifest.Documents[0].TextPath
+			textPath := result.Artifacts[0].TextPath
 			if got := textPath != ""; got != test.wantText {
 				t.Fatalf("has text artifact = %t, want %t", got, test.wantText)
 			}
@@ -337,7 +337,7 @@ func TestOfficePluginSampleConversion(t *testing.T) {
 			if len(result.Artifacts) == 0 || result.Artifacts[0].ImagePath == nil {
 				t.Fatalf("Office plugin produced no page image: %#v", result.Artifacts)
 			}
-			textPath := result.Manifest.Documents[0].TextPath
+			textPath := result.Artifacts[0].TextPath
 			content, err := os.ReadFile(filepath.Join(output, textPath))
 			if err != nil {
 				t.Fatal(err)
@@ -346,8 +346,8 @@ func TestOfficePluginSampleConversion(t *testing.T) {
 				t.Fatal("Office plugin produced no extracted text")
 			}
 			for _, artifact := range result.Artifacts {
-				if artifact.TextPath != "" {
-					t.Fatalf("Office image artifact unexpectedly references text: %#v", artifact)
+				if artifact.TextPath == "" {
+					t.Fatalf("Office image artifact has no corresponding text: %#v", artifact)
 				}
 			}
 		})

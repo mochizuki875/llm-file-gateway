@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -53,6 +54,11 @@ func (server *Server) handleInference(response http.ResponseWriter, request *htt
 	decoder := json.NewDecoder(request.Body)
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeError(response, apierror.RequestBodyTooLarge(server.maxInlineBodyBytes()))
+			return
+		}
 		writeError(response, apierror.New(400, "invalid_request", "Request body must be valid JSON.", ""))
 		return
 	}

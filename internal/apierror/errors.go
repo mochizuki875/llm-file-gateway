@@ -28,3 +28,9 @@ func FileTooLarge(maxBytes int64, param string) *Error {
 	}
 	return New(400, "file_too_large", "File exceeds the configured limit of "+display+".", param)
 }
+
+// RequestBodyTooLarge returns a 400 error describing the configured request
+// body size limit.
+func RequestBodyTooLarge(maxBytes int64) *Error {
+	return New(400, "request_too_large", fmt.Sprintf("Request body exceeds the configured limit of %d bytes.", maxBytes), "")
+}

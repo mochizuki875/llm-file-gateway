@@ -306,7 +306,7 @@ func TestConvertImageDocument(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "manifest.json")); err != nil {
 		t.Fatalf("manifest missing: %v", err)
 	}
-	if result.Manifest.SchemaVersion != 3 || result.Manifest.Source.MediaType != "image/png" {
+	if result.Manifest.SchemaVersion != ManifestSchemaVersion || result.Manifest.Source.MediaType != "image/png" {
 		t.Fatalf("manifest = %#v", result.Manifest)
 	}
 }

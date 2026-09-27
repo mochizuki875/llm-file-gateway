@@ -66,7 +66,7 @@ def main() -> None:
                 purpose="user_data",
                 expires_after={
                     "anchor": "created_at",
-                    "seconds": 600,
+                    "seconds": 300,
                 },
             )
         print(f"Uploaded: {uploaded_file.id}")

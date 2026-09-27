@@ -21,6 +21,18 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/store"
 )
 
+func TestNewUsesConfiguredQueueCapacity(t *testing.T) {
+	service := New(config.Config{ConversionQueueCapacity: 512}, nil, testDispatcher(t))
+	if capacity := cap(service.queue); capacity != 512 {
+		t.Fatalf("queue capacity = %d, want 512", capacity)
+	}
+
+	defaultService := New(config.Config{}, nil, testDispatcher(t))
+	if capacity := cap(defaultService.queue); capacity != defaultConversionQueueCapacity {
+		t.Fatalf("default queue capacity = %d, want %d", capacity, defaultConversionQueueCapacity)
+	}
+}
+
 func TestResolveMissingFileLogsWarning(t *testing.T) {
 	dataDir := t.TempDir()
 	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
@@ -689,9 +701,9 @@ func TestResolveProcessedFile(t *testing.T) {
 	relativeDir := filepath.Join("files", "tenant-a", "file_ready")
 	manifestPath := filepath.Join(relativeDir, "manifest.json")
 	manifest := converter.Manifest{
-		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		SchemaVersion: converter.ManifestSchemaVersion, ConverterVersion: converter.ConverterVersion,
 		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
-		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.ManifestPart{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
 	}
 	encoded, _ := json.Marshal(manifest)
 	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {
@@ -718,7 +730,7 @@ func TestResolveProcessedFile(t *testing.T) {
 	if release == nil {
 		t.Fatal("Resolve() returned a nil release function")
 	}
-	if gotRecord.ID != record.ID || gotManifest.SchemaVersion != 3 || len(gotManifest.Documents) != 1 {
+	if gotRecord.ID != record.ID || gotManifest.SchemaVersion != converter.ManifestSchemaVersion || len(gotManifest.Documents) != 1 {
 		t.Fatalf("resolved = %#v, %#v", gotRecord, gotManifest)
 	}
 	release()
@@ -736,9 +748,9 @@ func TestDeleteWaitsForActiveLease(t *testing.T) {
 	relativeDir := filepath.Join("files", "tenant-a", "file_leased")
 	manifestPath := filepath.Join(relativeDir, "manifest.json")
 	manifest := converter.Manifest{
-		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		SchemaVersion: converter.ManifestSchemaVersion, ConverterVersion: converter.ConverterVersion,
 		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
-		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.ManifestPart{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
 	}
 	encoded, _ := json.Marshal(manifest)
 	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {
@@ -811,9 +823,9 @@ func TestDeleteExpiredWaitsForActiveLease(t *testing.T) {
 	relativeDir := filepath.Join("files", "tenant-a", "file_expired_leased")
 	manifestPath := filepath.Join(relativeDir, "manifest.json")
 	manifest := converter.Manifest{
-		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		SchemaVersion: converter.ManifestSchemaVersion, ConverterVersion: converter.ConverterVersion,
 		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
-		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.ManifestPart{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
 	}
 	encoded, _ := json.Marshal(manifest)
 	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {
@@ -909,9 +921,9 @@ func TestResolveRejectsFileDeletedConcurrently(t *testing.T) {
 	relativeDir := filepath.Join("files", "tenant-a", "file_toc")
 	manifestPath := filepath.Join(relativeDir, "manifest.json")
 	manifest := converter.Manifest{
-		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		SchemaVersion: converter.ManifestSchemaVersion, ConverterVersion: converter.ConverterVersion,
 		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
-		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.ManifestPart{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
 	}
 	encoded, _ := json.Marshal(manifest)
 	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {
@@ -1000,9 +1012,9 @@ func TestDeleteAndJanitorRace(t *testing.T) {
 	relativeDir := filepath.Join("files", "tenant-a", "file_race")
 	manifestPath := filepath.Join(relativeDir, "manifest.json")
 	manifest := converter.Manifest{
-		SchemaVersion: 3, ConverterVersion: "2026.09.0",
+		SchemaVersion: converter.ManifestSchemaVersion, ConverterVersion: converter.ConverterVersion,
 		Source:    converter.ManifestSource{MediaType: "text/plain", SHA256: "digest"},
-		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.Artifact{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+		Documents: []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.ManifestPart{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
 	}
 	encoded, _ := json.Marshal(manifest)
 	if err := os.MkdirAll(filepath.Join(dataDir, relativeDir), 0o755); err != nil {

@@ -17,9 +17,10 @@ LLM File Gateway is a Go gateway that provides an OpenAI Files API-compatible in
 | `internal/config` | Environment variable validation (`config.Load`) |
 | `internal/store` | SQLite schema and tenant-aware CRUD |
 | `internal/files` | File storage, conversion queue, workers, janitor |
-| `internal/converter` | Converter registry, dispatcher, pipeline, format converters and extractors |
+| `internal/converter` | Converter registry, dispatcher, shared conversion helpers, format converters and extractors |
 | `internal/server` | Files/Responses/Chat APIs, file expansion, public URL fetch, vLLM proxy |
 | `internal/apierror` | OpenAI-format errors |
+| `internal/logging` | Verbosity-based structured logging |
 | `test/` | Integration tests (real PDF/Office conversion, requires LibreOffice/PDFium) |
 
 ### Converter architecture
@@ -28,7 +29,7 @@ LLM File Gateway is a Go gateway that provides an OpenAI Files API-compatible in
 - `Registry` maps extensions to converters; `Dispatcher` resolves a converter by path and falls back to the shared `textConverter` for unknown extensions.
 - Text formats use `extractor.Extractor` (`func(string) (string, error)`) in `internal/converter/extractor/`; every extractor must call `readUTF8` to validate UTF-8 and reject NUL bytes.
 - PDF/Office rendering is delegated to `document-image-renderer` via `convertRenderedDocument`; images use `convertImage`; text uses `convertTextDocument`.
-- Converters never write `manifest.json` directly — the shared pipeline in `pipeline.go` produces artifacts and the manifest.
+- Converters never write `manifest.json` directly — the shared conversion helpers in `converter.go` and `util.go` (`writeResult`) produce artifacts and the manifest.
 
 ## Build and Test
 
@@ -36,7 +37,7 @@ LLM File Gateway is a Go gateway that provides an OpenAI Files API-compatible in
 make build            # build to _output/llm-file-gateway
 make test             # unit tests only (internal/... cmd/...), no external tools
 make test-integration # integration tests (test/...), requires LibreOffice + fonts
-make verify           # unit tests with -race + go vet
+make verify           # unit tests with -race + go vet + golangci-lint
 make run              # run the gateway
 ```
 
@@ -54,7 +55,7 @@ make run              # run the gateway
   4. Register in `NewInTreeRegistry` (`registry.go`); duplicate extensions are an error.
   5. Add tests: `registry_test.go` (`TestInTreeRegistryContainsSupportedFormats`), `text_common_test.go` (`TestTextConverters`), and converter tests via `convertForTest`.
 - Extensions are normalized to lowercase in the registry; register them lowercase with a leading dot.
-- `Registry` is a `map[string]ConverterFactory` (Kubernetes-style). Factories receive `ConverterConfig` (DPI, image format, LibreOffice timeout) and a `ConverterHandle`; use `ConverterAdapter` for stateless in-tree converters.
+- `Registry` is a `map[string]ConverterFactory` (Kubernetes-style). Factories receive `ConverterConfig` (DPI, image format, timeouts, and renderer resource limits) and a `ConverterHandle`; use `ConverterAdapter` for stateless in-tree converters.
 - For changes affecting conversion output, run the PDF and each Office integration test, considering LibreOffice, font, and `document-image-renderer` version differences.
 - Do not log file contents or API keys explicitly.
 - `file_url` must be HTTPS on port 443 with a public IP, re-validated on each redirect.

@@ -19,6 +19,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM debian:bookworm-slim
 
+LABEL org.opencontainers.image.source="https://github.com/mochizuki875/llm-file-gateway" \
+      org.opencontainers.image.title="LLM File Gateway" \
+      org.opencontainers.image.description="OpenAI-compatible file input gateway for LLM backends" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \

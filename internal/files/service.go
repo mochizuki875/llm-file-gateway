@@ -99,12 +99,18 @@ type conversionJob struct {
 // maxRetries is the number of times a conversion job will be retried before it is dropped.
 const maxRetries = 3
 
+const defaultConversionQueueCapacity = 128
+
 // New creates a file service backed by the given store and converter dispatcher.
 func New(settings config.Config, dataStore *store.Store, dispatcher *converter.Dispatcher) *Service {
 	if dispatcher == nil {
 		panic("converter dispatcher must not be nil")
 	}
-	service := &Service{settings: settings, store: dataStore, dispatcher: dispatcher, queue: make(chan conversionJob, 128), retryCount: make(map[string]int), conversions: make(map[string]*fileLifecycle), leases: make(map[string]*fileLease), deleting: make(map[string]chan struct{})}
+	queueCapacity := settings.ConversionQueueCapacity
+	if queueCapacity <= 0 {
+		queueCapacity = defaultConversionQueueCapacity
+	}
+	service := &Service{settings: settings, store: dataStore, dispatcher: dispatcher, queue: make(chan conversionJob, queueCapacity), retryCount: make(map[string]int), conversions: make(map[string]*fileLifecycle), leases: make(map[string]*fileLease), deleting: make(map[string]chan struct{})}
 	service.lifecycleCtx, service.lifecycleCancel = context.WithCancel(context.Background())
 	service.syncHandler = service.convert
 	return service

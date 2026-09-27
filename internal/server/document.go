@@ -128,21 +128,6 @@ func (server *Server) documentParts(document resolvedDocument, kind string) ([]a
 	}
 	parts := make([]any, 0)
 	manifestDocument := document.manifest.Documents[0]
-	if manifestDocument.TextPath != "" {
-		text, err := os.ReadFile(filepath.Join(document.derivedDir, manifestDocument.TextPath))
-		if err != nil {
-			slog.Error("document text artifact read failed", "filename", document.filename, "error", err)
-			return nil, err
-		}
-		if len(text) > 0 {
-			label := fmt.Sprintf("<document filename=\"%s\">\n%s\n</document>", document.filename, text)
-			textType := "input_text"
-			if kind == "chat" {
-				textType = "text"
-			}
-			parts = append(parts, map[string]any{"type": textType, "text": label})
-		}
-	}
 	images := 0
 	for _, artifact := range manifestDocument.Parts {
 		if artifact.TextPath != "" {

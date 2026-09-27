@@ -16,23 +16,34 @@ const defaultFileTTL = 5 * time.Minute
 
 // Config holds all validated gateway settings loaded from environment variables.
 type Config struct {
-	Address               string
-	VLLMModel             string
-	VLLMBaseURL           *url.URL
-	GatewayAuthRequired   bool
-	GatewayAPIKey         string
-	VLLMAPIKey            string
-	DataDir               string
-	FileTTL               time.Duration
-	MaxFileBytes          int64
-	MaxRequestBodyBytes   int64
-	MaxDocumentPages      int
-	MaxDocumentTextChars  int
-	DocumentDPI           int
-	TextExtractionEnabled bool
-	Workers               int
-	RequestTimeout        time.Duration
-	LogVerbosity          int
+	Address                     string
+	VLLMModel                   string
+	VLLMBaseURL                 *url.URL
+	GatewayAuthRequired         bool
+	GatewayAPIKey               string
+	VLLMAPIKey                  string
+	DataDir                     string
+	FileTTL                     time.Duration
+	MaxFileBytes                int64
+	MaxRequestBodyBytes         int64
+	MaxDocumentPages            int
+	MaxDocumentTextChars        int
+	MaxDocumentPDFBytes         uint64
+	MaxDocumentPageWidth        int
+	MaxDocumentPageHeight       int
+	MaxDocumentPagePixels       uint64
+	MaxDocumentPixels           uint64
+	MaxDocumentOOXMLMembers     int
+	MaxDocumentOOXMLMemberBytes uint64
+	MaxDocumentOOXMLTotalBytes  uint64
+	DocumentDPI                 int
+	DocumentRenderTimeout       time.Duration
+	LibreOfficeTimeout          time.Duration
+	TextExtractionEnabled       bool
+	Workers                     int
+	ConversionQueueCapacity     int
+	RequestTimeout              time.Duration
+	LogVerbosity                int
 }
 
 // Load reads and validates the gateway configuration from environment
@@ -83,9 +94,49 @@ func Load() (Config, error) {
 	if err != nil || maxTextChars < 0 {
 		return Config{}, fmt.Errorf("MAX_DOCUMENT_TEXT_CHARS must be a non-negative integer")
 	}
+	maxPDFBytes, err := envUint64("MAX_DOCUMENT_PDF_BYTES", 128<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	maxPageWidth, err := envInt("MAX_DOCUMENT_PAGE_WIDTH", 20_000)
+	if err != nil || maxPageWidth < 0 {
+		return Config{}, fmt.Errorf("MAX_DOCUMENT_PAGE_WIDTH must be a non-negative integer")
+	}
+	maxPageHeight, err := envInt("MAX_DOCUMENT_PAGE_HEIGHT", 20_000)
+	if err != nil || maxPageHeight < 0 {
+		return Config{}, fmt.Errorf("MAX_DOCUMENT_PAGE_HEIGHT must be a non-negative integer")
+	}
+	maxPagePixels, err := envUint64("MAX_DOCUMENT_PAGE_PIXELS", 200_000_000)
+	if err != nil {
+		return Config{}, err
+	}
+	maxDocumentPixels, err := envUint64("MAX_DOCUMENT_PIXELS", 1_000_000_000)
+	if err != nil {
+		return Config{}, err
+	}
+	maxOOXMLMembers, err := envInt("MAX_DOCUMENT_OOXML_MEMBERS", 10_000)
+	if err != nil || maxOOXMLMembers < 0 {
+		return Config{}, fmt.Errorf("MAX_DOCUMENT_OOXML_MEMBERS must be a non-negative integer")
+	}
+	maxOOXMLMemberBytes, err := envUint64("MAX_DOCUMENT_OOXML_MEMBER_BYTES", 256<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	maxOOXMLTotalBytes, err := envUint64("MAX_DOCUMENT_OOXML_TOTAL_BYTES", 1<<30)
+	if err != nil {
+		return Config{}, err
+	}
 	documentDPI, err := envInt("DOCUMENT_DPI", 300)
 	if err != nil || documentDPI < 1 || documentDPI > 1200 {
 		return Config{}, fmt.Errorf("DOCUMENT_DPI must be an integer between 1 and 1200")
+	}
+	documentRenderTimeoutSeconds, err := envFloat("DOCUMENT_RENDER_TIMEOUT_SECONDS", 300)
+	if err != nil || documentRenderTimeoutSeconds < 0 {
+		return Config{}, fmt.Errorf("DOCUMENT_RENDER_TIMEOUT_SECONDS must be non-negative")
+	}
+	libreOfficeTimeoutSeconds, err := envFloat("DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS", 300)
+	if err != nil || libreOfficeTimeoutSeconds < 0 {
+		return Config{}, fmt.Errorf("DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS must be non-negative")
 	}
 	textExtractionEnabled, err := envBool("DOCUMENT_TEXT_EXTRACTION_ENABLED", true)
 	if err != nil {
@@ -94,6 +145,10 @@ func Load() (Config, error) {
 	workers, err := envInt("CONVERSION_WORKERS", 2)
 	if err != nil || workers < 1 {
 		return Config{}, fmt.Errorf("CONVERSION_WORKERS must be a positive integer")
+	}
+	conversionQueueCapacity, err := envInt("CONVERSION_QUEUE_CAPACITY", 128)
+	if err != nil || conversionQueueCapacity < 1 {
+		return Config{}, fmt.Errorf("CONVERSION_QUEUE_CAPACITY must be a positive integer")
 	}
 	timeoutSeconds, err := envFloat("REQUEST_TIMEOUT_SECONDS", 300)
 	if err != nil || timeoutSeconds < 0 {
@@ -105,23 +160,34 @@ func Load() (Config, error) {
 	}
 
 	config := Config{
-		Address:               net.JoinHostPort(gatewayHost, strconv.Itoa(gatewayPort)),
-		VLLMModel:             model,
-		VLLMBaseURL:           baseURL,
-		GatewayAuthRequired:   authRequired,
-		GatewayAPIKey:         os.Getenv("GATEWAY_API_KEY"),
-		VLLMAPIKey:            os.Getenv("VLLM_API_KEY"),
-		DataDir:               envString("GATEWAY_DATA_DIR", "gateway-data"),
-		FileTTL:               time.Duration(fileTTLSeconds) * time.Second,
-		MaxFileBytes:          maxFileBytes,
-		MaxRequestBodyBytes:   maxRequestBodyBytes,
-		MaxDocumentPages:      maxPages,
-		MaxDocumentTextChars:  maxTextChars,
-		DocumentDPI:           documentDPI,
-		TextExtractionEnabled: textExtractionEnabled,
-		Workers:               workers,
-		RequestTimeout:        time.Duration(timeoutSeconds * float64(time.Second)),
-		LogVerbosity:          logVerbosity,
+		Address:                     net.JoinHostPort(gatewayHost, strconv.Itoa(gatewayPort)),
+		VLLMModel:                   model,
+		VLLMBaseURL:                 baseURL,
+		GatewayAuthRequired:         authRequired,
+		GatewayAPIKey:               os.Getenv("GATEWAY_API_KEY"),
+		VLLMAPIKey:                  os.Getenv("VLLM_API_KEY"),
+		DataDir:                     envString("GATEWAY_DATA_DIR", "gateway-data"),
+		FileTTL:                     time.Duration(fileTTLSeconds) * time.Second,
+		MaxFileBytes:                maxFileBytes,
+		MaxRequestBodyBytes:         maxRequestBodyBytes,
+		MaxDocumentPages:            maxPages,
+		MaxDocumentTextChars:        maxTextChars,
+		MaxDocumentPDFBytes:         maxPDFBytes,
+		MaxDocumentPageWidth:        maxPageWidth,
+		MaxDocumentPageHeight:       maxPageHeight,
+		MaxDocumentPagePixels:       maxPagePixels,
+		MaxDocumentPixels:           maxDocumentPixels,
+		MaxDocumentOOXMLMembers:     maxOOXMLMembers,
+		MaxDocumentOOXMLMemberBytes: maxOOXMLMemberBytes,
+		MaxDocumentOOXMLTotalBytes:  maxOOXMLTotalBytes,
+		DocumentDPI:                 documentDPI,
+		DocumentRenderTimeout:       time.Duration(documentRenderTimeoutSeconds * float64(time.Second)),
+		LibreOfficeTimeout:          time.Duration(libreOfficeTimeoutSeconds * float64(time.Second)),
+		TextExtractionEnabled:       textExtractionEnabled,
+		Workers:                     workers,
+		ConversionQueueCapacity:     conversionQueueCapacity,
+		RequestTimeout:              time.Duration(timeoutSeconds * float64(time.Second)),
+		LogVerbosity:                logVerbosity,
 	}
 	if config.VLLMAPIKey == "" {
 		return Config{}, fmt.Errorf("VLLM_API_KEY is required")
@@ -172,6 +238,20 @@ func envInt64(name string, fallback int64) (int64, error) {
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	return parsed, nil
+}
+
+// envUint64 parses the named environment variable as a uint64, using the
+// fallback when it is unset.
+func envUint64(name string, fallback uint64) (uint64, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a non-negative integer", name)
 	}
 	return parsed, nil
 }

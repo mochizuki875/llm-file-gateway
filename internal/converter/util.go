@@ -128,18 +128,12 @@ func removeConversionOutput(outputDir string) error {
 
 // writeResult writes manifest.json next to the output directory and returns
 // the conversion result.
-func writeResult(source, outputDir, mediaType, textPath string, artifacts []Artifact) (Result, error) {
+func writeResult(source, outputDir, mediaType string, artifacts []ManifestPart) (Result, error) {
 	digest, err := hashFile(source)
 	if err != nil {
 		return Result{}, err
 	}
-	warnings := []string{}
-	manifest := Manifest{
-		SchemaVersion: 3, ConverterVersion: "2026.09.0",
-		Source:    ManifestSource{MediaType: mediaType, SHA256: digest},
-		Documents: []ManifestDocument{{Name: filepath.Base(source), TextPath: textPath, Parts: artifacts}},
-		Warnings:  warnings,
-	}
+	manifest := newManifest(source, mediaType, digest, artifacts)
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return Result{}, err
@@ -148,5 +142,5 @@ func writeResult(source, outputDir, mediaType, textPath string, artifacts []Arti
 	if err := os.WriteFile(filepath.Join(filepath.Dir(outputDir), "manifest.json"), encoded, 0o600); err != nil {
 		return Result{}, err
 	}
-	return Result{Manifest: manifest, Artifacts: artifacts, Warnings: warnings}, nil
+	return Result{Manifest: manifest, Artifacts: artifacts, Warnings: manifest.Warnings}, nil
 }

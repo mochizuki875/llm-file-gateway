@@ -70,6 +70,16 @@ func run() error {
 	// Set up the file service with the converter dispatcher.
 	converterConfig := converter.DefaultConverterConfig()
 	converterConfig.DPI = settings.DocumentDPI
+	converterConfig.RenderTimeout = settings.DocumentRenderTimeout
+	converterConfig.LibreOfficeTimeout = settings.LibreOfficeTimeout
+	converterConfig.MaxPDFBytes = settings.MaxDocumentPDFBytes
+	converterConfig.MaxPageWidth = settings.MaxDocumentPageWidth
+	converterConfig.MaxPageHeight = settings.MaxDocumentPageHeight
+	converterConfig.MaxPagePixels = settings.MaxDocumentPagePixels
+	converterConfig.MaxDocumentPixels = settings.MaxDocumentPixels
+	converterConfig.MaxOOXMLMembers = settings.MaxDocumentOOXMLMembers
+	converterConfig.MaxOOXMLMemberBytes = settings.MaxDocumentOOXMLMemberBytes
+	converterConfig.MaxOOXMLTotalBytes = settings.MaxDocumentOOXMLTotalBytes
 	fileService := files.New(settings, dataStore, converter.NewDispatcher(registry, converterConfig, converter.SettingsHandle{SettingsValue: settings}))
 	if err := fileService.ReconcileStorage(context.Background()); err != nil {
 		return err

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from openai import NotFoundError, OpenAI
 
-DOCUMENT_PATH = Path(__file__).with_name("samplefile.pptx")
+DOCUMENT_PATH = Path(__file__).with_name("samplefile.docx")
 POLL_INTERVAL_SECONDS = 0.5
 PROCESSING_TIMEOUT_SECONDS = 300.0
 SUMMARY_PROMPT = "この内容を日本語で簡潔に要約してください。"
@@ -72,7 +72,7 @@ def main() -> None:
                 purpose="user_data",
                 expires_after={
                         "anchor": "created_at",
-                        "seconds": 600,
+                        "seconds": 300,
                     },
                 )
 

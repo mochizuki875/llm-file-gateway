@@ -23,17 +23,35 @@ var ErrConverterNotFound = errors.New("converter not found")
 // ConverterConfig holds the static configuration passed to converter factories
 // when they are instantiated.
 type ConverterConfig struct {
-	DPI                int
-	ImageFormat        renderer.ImageFormat
-	LibreOfficeTimeout time.Duration
+	DPI                 int
+	ImageFormat         renderer.ImageFormat
+	RenderTimeout       time.Duration
+	LibreOfficeTimeout  time.Duration
+	MaxPDFBytes         uint64
+	MaxPageWidth        int
+	MaxPageHeight       int
+	MaxPagePixels       uint64
+	MaxDocumentPixels   uint64
+	MaxOOXMLMembers     int
+	MaxOOXMLMemberBytes uint64
+	MaxOOXMLTotalBytes  uint64
 }
 
 // DefaultConverterConfig returns the default converter configuration.
 func DefaultConverterConfig() ConverterConfig {
 	return ConverterConfig{
-		DPI:                300,
-		ImageFormat:        renderer.ImageFormatPNG,
-		LibreOfficeTimeout: 300 * time.Second,
+		DPI:                 300,
+		ImageFormat:         renderer.ImageFormatPNG,
+		RenderTimeout:       300 * time.Second,
+		LibreOfficeTimeout:  300 * time.Second,
+		MaxPDFBytes:         128 << 20,
+		MaxPageWidth:        20_000,
+		MaxPageHeight:       20_000,
+		MaxPagePixels:       200_000_000,
+		MaxDocumentPixels:   1_000_000_000,
+		MaxOOXMLMembers:     10_000,
+		MaxOOXMLMemberBytes: 256 << 20,
+		MaxOOXMLTotalBytes:  1 << 30,
 	}
 }
 

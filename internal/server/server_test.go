@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -694,7 +695,8 @@ func TestResponsesReportsDocumentTextLimit(t *testing.T) {
 	}
 	var result struct {
 		Error struct {
-			Code string `json:"code"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
@@ -816,14 +818,18 @@ func TestInlineFileDataOversizedBodyRejected(t *testing.T) {
 	}
 	var result struct {
 		Error struct {
-			Code string `json:"code"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Error.Code != "invalid_request" {
-		t.Fatalf("error code = %q, want invalid_request", result.Error.Code)
+	if result.Error.Code != "request_too_large" {
+		t.Fatalf("error code = %q, want request_too_large", result.Error.Code)
+	}
+	if result.Error.Message != fmt.Sprintf("Request body exceeds the configured limit of %d bytes.", settings.MaxRequestBodyBytes) {
+		t.Fatalf("error message = %q", result.Error.Message)
 	}
 }
 
@@ -1038,8 +1044,8 @@ func TestInlineFileDataMultiFileTotalLimit(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Error.Code != "invalid_request" {
-		t.Fatalf("error code = %q, want invalid_request", result.Error.Code)
+	if result.Error.Code != "request_too_large" {
+		t.Fatalf("error code = %q, want request_too_large", result.Error.Code)
 	}
 }
 
@@ -1081,8 +1087,8 @@ func TestInlineFileDataAggregateLimit(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Error.Code != "invalid_request" {
-		t.Fatalf("error code = %q, want invalid_request", result.Error.Code)
+	if result.Error.Code != "request_too_large" {
+		t.Fatalf("error code = %q, want request_too_large", result.Error.Code)
 	}
 }
 
@@ -1132,7 +1138,7 @@ func TestDocumentPartsReportsMissingArtifact(t *testing.T) {
 	document := resolvedDocument{
 		filename:   "notes.txt",
 		derivedDir: t.TempDir(),
-		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{Parts: []converter.Artifact{{
+		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{Parts: []converter.ManifestPart{{
 			PartNumber: 1,
 			TextPath:   "missing.txt",
 		}}}}},
@@ -1143,12 +1149,12 @@ func TestDocumentPartsReportsMissingArtifact(t *testing.T) {
 	}
 }
 
-func TestDocumentPartsEmitsDocumentTextBeforeImages(t *testing.T) {
+func TestDocumentPartsEmitsArtifactTextBeforeImage(t *testing.T) {
 	settings, _, _ := testDependencies(t)
 	settings.MaxDocumentPages = 1
 	server := &Server{settings: settings}
 	derivedDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(derivedDir, "document.txt"), []byte("complete document text"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(derivedDir, "page.txt"), []byte("page text"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(derivedDir, "page.png"), []byte("image"), 0o644); err != nil {
@@ -1159,12 +1165,9 @@ func TestDocumentPartsEmitsDocumentTextBeforeImages(t *testing.T) {
 	document := resolvedDocument{
 		filename:   "document.docx",
 		derivedDir: derivedDir,
-		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{
-			TextPath: "document.txt",
-			Parts: []converter.Artifact{{
-				PartNumber: 1, PageNumber: &pageNumber, ImagePath: &imagePath,
-			}},
-		}}},
+		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{Parts: []converter.ManifestPart{{
+			PartNumber: 1, PageNumber: &pageNumber, TextPath: "page.txt", ImagePath: &imagePath,
+		}}}}},
 	}
 
 	parts, err := server.documentParts(document, "responses")
@@ -1172,11 +1175,11 @@ func TestDocumentPartsEmitsDocumentTextBeforeImages(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(parts) != 2 {
-		t.Fatalf("parts = %#v, want document text and one image", parts)
+		t.Fatalf("parts = %#v, want artifact text and one image", parts)
 	}
 	text := parts[0].(map[string]any)
-	if text["type"] != "input_text" || !strings.Contains(text["text"].(string), "complete document text") || strings.Contains(text["text"].(string), "page=") {
-		t.Fatalf("document text part = %#v", text)
+	if text["type"] != "input_text" || !strings.Contains(text["text"].(string), "page text") || !strings.Contains(text["text"].(string), `page="1"`) {
+		t.Fatalf("artifact text part = %#v", text)
 	}
 	if parts[1].(map[string]any)["type"] != "input_image" {
 		t.Fatalf("image part = %#v", parts[1])
@@ -1198,7 +1201,7 @@ func TestDocumentPartsOmitsEmptyText(t *testing.T) {
 	document := resolvedDocument{
 		filename:   "document.pdf",
 		derivedDir: derivedDir,
-		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{Parts: []converter.Artifact{{
+		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{Parts: []converter.ManifestPart{{
 			PartNumber: 1, TextPath: "page.txt", ImagePath: &imagePath,
 		}}}}},
 	}
@@ -1224,7 +1227,7 @@ func TestDocumentPartsUnlimitedPagesEmitsAllImages(t *testing.T) {
 	document := resolvedDocument{
 		filename:   "document.pdf",
 		derivedDir: derivedDir,
-		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{Parts: []converter.Artifact{
+		manifest: converter.Manifest{Documents: []converter.ManifestDocument{{Parts: []converter.ManifestPart{
 			{PartNumber: 1, ImagePath: &imagePath},
 			{PartNumber: 2, ImagePath: &imagePath},
 			{PartNumber: 3, ImagePath: &imagePath},

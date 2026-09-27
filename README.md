@@ -98,9 +98,20 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | `MAX_REQUEST_BODY_BYTES` | No | `MAX_FILE_BYTES`の4倍 | 推論リクエスト(`/v1/responses`、`/v1/chat/completions`)のボディ全体の最大サイズ(bytes)。複数の`file_data`を含む場合の合計上限（`0`で無制限） |
 | `MAX_DOCUMENT_PAGES` | No | `50` | Gatewayで受け付けるPDF/Officeの最大ページ数（`0`で無制限） |
 | `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | 1ファイルから抽出するテキストの最大文字数（`0`で無制限） |
+| `MAX_DOCUMENT_PDF_BYTES` | No | `134217728` (128 MiB) | rendererが処理するPDFの最大サイズ(bytes)（`0`で無制限） |
+| `MAX_DOCUMENT_PAGE_WIDTH` | No | `20000` | 描画する1 pageの最大幅(px)（`0`で無制限） |
+| `MAX_DOCUMENT_PAGE_HEIGHT` | No | `20000` | 描画する1 pageの最大高さ(px)（`0`で無制限） |
+| `MAX_DOCUMENT_PAGE_PIXELS` | No | `200000000` | 描画する1 pageの最大画素数（`0`で無制限） |
+| `MAX_DOCUMENT_PIXELS` | No | `1000000000` | 1 document全体の最大画素数（`0`で無制限） |
+| `MAX_DOCUMENT_OOXML_MEMBERS` | No | `10000` | OOXML archiveの最大member数（`0`で無制限） |
+| `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | No | `268435456` (256 MiB) | OOXML archive内の単一memberの最大展開サイズ(bytes)（`0`で無制限） |
+| `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | No | `1073741824` (1 GiB) | OOXML archive全体の最大展開サイズ(bytes)（`0`で無制限） |
 | `DOCUMENT_DPI` | No | `300` | PDF/Officeを画像へ変換する際の解像度(DPI)。1〜1200の整数 |
+| `DOCUMENT_RENDER_TIMEOUT_SECONDS` | No | `300` | PDF/Officeの画像変換timeout(sec)（`0`で無制限）|
+| `DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS` | No | `300` | Office変換で使用するLibreOfficeのtimeout(sec)（`0`で無制限） |
 | `DOCUMENT_TEXT_EXTRACTION_ENABLED` | No | `true` | PDFとOfficeからテキストを抽出するか |
 | `CONVERSION_WORKERS` | No | `2` | 並行してファイルを変換するworker数。正の整数で変更可能 |
+| `CONVERSION_QUEUE_CAPACITY` | No | `128` | workerの処理開始を待つ変換jobをqueueに保持できる件数。正の整数で変更可能 |
 | `REQUEST_TIMEOUT_SECONDS` | No | `300` | vLLM通信のtimeout。streamingではstream全体に適用（`0`で無制限） |
 | `LOGLEVEL` | No | `0` | ログverbosity（`0`: 通常、`1`: DEBUG、`2`: 高頻度の詳細ログ） |
 
@@ -223,6 +234,32 @@ curl --fail --silent "$OPENAI_BASE_URL/responses" \
 # Delete the document from the Gateway
 curl --fail --silent -X DELETE "$OPENAI_BASE_URL/files/$FILE_ID" \
   -H "Authorization: Bearer $OPENAI_API_KEY"
+```
+
+インターネット上のPDFファイルのURLを指定(`file_url`)する例。
+
+```bash
+curl --fail --silent http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "'"$OPENAI_MODEL"'",
+    "input": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "input_file",
+            "file_url": "https://some/url/filename.pdf"
+          },
+          {
+            "type": "input_text",
+            "text": "この文書を簡潔に要約してください。"
+          }
+        ]
+      }
+    ]
+  }' | jq '{id, status, output_text: [.output[].content[] | select(.type == "output_text").text] | join("")}'
 ```
 
 ### Input Forms

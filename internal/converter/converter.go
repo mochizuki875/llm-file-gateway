@@ -25,46 +25,62 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 		renderOptions := renderer.DefaultRenderOptions()
 		renderOptions.DPI = config.DPI
 		renderOptions.ImageFormat = config.ImageFormat
+		renderOptions.RenderTimeout = config.RenderTimeout
 		renderOptions.LibreOfficeTimeout = config.LibreOfficeTimeout
 		renderOptions.MaxPages = options.MaxPages
+		renderOptions.MaxPDFBytes = config.MaxPDFBytes
+		renderOptions.MaxPageWidth = config.MaxPageWidth
+		renderOptions.MaxPageHeight = config.MaxPageHeight
+		renderOptions.MaxPagePixels = config.MaxPagePixels
+		renderOptions.MaxDocumentPixels = config.MaxDocumentPixels
+		renderOptions.MaxOOXMLMembers = config.MaxOOXMLMembers
+		renderOptions.MaxOOXMLMemberBytes = config.MaxOOXMLMemberBytes
+		renderOptions.MaxOOXMLTotalBytes = config.MaxOOXMLTotalBytes
 		rendered, err := renderer.RenderDocument(ctx, source, outputDir, &renderOptions)
 		if err != nil {
 			return Result{}, mapRendererError(err, options.MaxPages)
 		}
-		documentText := ""
+		var extracted *renderer.ExtractResult
 		if !options.DisableTextExtraction {
 			extractOptions := renderer.DefaultExtractOptions()
 			extractOptions.LibreOfficeTimeout = config.LibreOfficeTimeout
 			extractOptions.MaxCharacters = options.MaxTextChars
-			extracted, err := renderer.ExtractDocumentWithOptions(ctx, source, &extractOptions)
+			extractOptions.MaxPDFBytes = config.MaxPDFBytes
+			extractOptions.MaxOOXMLMembers = config.MaxOOXMLMembers
+			extractOptions.MaxOOXMLMemberBytes = config.MaxOOXMLMemberBytes
+			extractOptions.MaxOOXMLTotalBytes = config.MaxOOXMLTotalBytes
+			extracted, err = renderer.ExtractDocumentWithOptions(ctx, source, &extractOptions)
 			if err != nil {
 				return Result{}, mapRendererError(err, options.MaxPages)
 			}
-			documentText = extracted.Text()
 		}
-		textPath := ""
-		if !options.DisableTextExtraction {
-			textPath = "document.txt"
-			if err := os.WriteFile(filepath.Join(outputDir, textPath), []byte(documentText), 0o600); err != nil {
-				return Result{}, err
-			}
-		}
-		artifacts := make([]Artifact, 0, len(rendered.Images))
+		artifacts := make([]ManifestPart, 0, len(rendered.Images))
 		for index, page := range rendered.Images {
 			imageName := filepath.Base(page.Path)
+			textPath := ""
+			if extracted != nil {
+				textPath = strings.TrimSuffix(imageName, filepath.Ext(imageName)) + ".txt"
+				text := ""
+				if part, found := extracted.Part(page.PageNumber); found {
+					text = part.Text
+				}
+				if err := os.WriteFile(filepath.Join(outputDir, textPath), []byte(text), 0o600); err != nil {
+					return Result{}, err
+				}
+			}
 			digest, err := hashFile(page.Path)
 			if err != nil {
 				return Result{}, err
 			}
 			pageNumber, width, height := page.PageNumber, page.Width, page.Height
 			imageMediaType := "image/png"
-			artifacts = append(artifacts, Artifact{
+			artifacts = append(artifacts, ManifestPart{
 				PartNumber: index + 1, PageNumber: &pageNumber,
-				ImagePath: &imageName, Width: &width, Height: &height,
+				TextPath: textPath, ImagePath: &imageName, Width: &width, Height: &height,
 				MediaType: &imageMediaType, SHA256: &digest,
 			})
 		}
-		return writeResult(source, outputDir, mediaType, textPath, artifacts)
+		return writeResult(source, outputDir, mediaType, artifacts)
 	})
 }
 
@@ -92,15 +108,15 @@ func convertTextDocument(source, outputDir, mediaType string, textBlocks []strin
 		return Result{}, err
 	}
 	return withOutputDirectory(outputDir, func() (Result, error) {
-		artifacts := make([]Artifact, 0, len(textBlocks))
+		artifacts := make([]ManifestPart, 0, len(textBlocks))
 		for index, text := range textBlocks {
 			name := fmt.Sprintf("part-%04d.txt", index+1)
 			if err := os.WriteFile(filepath.Join(outputDir, name), []byte(text), 0o600); err != nil {
 				return Result{}, err
 			}
-			artifacts = append(artifacts, Artifact{PartNumber: index + 1, TextPath: name})
+			artifacts = append(artifacts, ManifestPart{PartNumber: index + 1, TextPath: name})
 		}
-		return writeResult(source, outputDir, mediaType, "", artifacts)
+		return writeResult(source, outputDir, mediaType, artifacts)
 	})
 }
 
@@ -119,10 +135,10 @@ func convertImageDocument(source, outputDir, mediaType string, width, height int
 		if err != nil {
 			return Result{}, err
 		}
-		artifact := Artifact{
+		artifact := ManifestPart{
 			PartNumber: 1, TextPath: "part-0001.txt", ImagePath: &imageName,
 			Width: &width, Height: &height, MediaType: &mediaType, SHA256: &digest,
 		}
-		return writeResult(source, outputDir, mediaType, "", []Artifact{artifact})
+		return writeResult(source, outputDir, mediaType, []ManifestPart{artifact})
 	})
 }

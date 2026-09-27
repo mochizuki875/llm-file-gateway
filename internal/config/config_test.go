@@ -202,6 +202,41 @@ func TestLoadWorkers(t *testing.T) {
 	}
 }
 
+func TestLoadConversionQueueCapacity(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "default", want: 128},
+		{name: "custom", value: "512", want: 512},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CONVERSION_QUEUE_CAPACITY", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.ConversionQueueCapacity != test.want {
+				t.Fatalf("ConversionQueueCapacity = %d, want %d", settings.ConversionQueueCapacity, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"0", "-1", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("CONVERSION_QUEUE_CAPACITY", value)
+			if _, err := Load(); err == nil || err.Error() != "CONVERSION_QUEUE_CAPACITY must be a positive integer" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadLogVerbosity(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
@@ -426,6 +461,135 @@ func TestLoadDocumentDPI(t *testing.T) {
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Setenv("DOCUMENT_DPI", value)
 			if _, err := Load(); err == nil || err.Error() != "DOCUMENT_DPI must be an integer between 1 and 1200" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadDocumentResourceLimits(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	tests := []struct {
+		name         string
+		environment  string
+		defaultValue uint64
+		get          func(Config) uint64
+	}{
+		{name: "pdf_bytes", environment: "MAX_DOCUMENT_PDF_BYTES", defaultValue: 128 << 20, get: func(settings Config) uint64 { return settings.MaxDocumentPDFBytes }},
+		{name: "page_width", environment: "MAX_DOCUMENT_PAGE_WIDTH", defaultValue: 20_000, get: func(settings Config) uint64 { return uint64(settings.MaxDocumentPageWidth) }},
+		{name: "page_height", environment: "MAX_DOCUMENT_PAGE_HEIGHT", defaultValue: 20_000, get: func(settings Config) uint64 { return uint64(settings.MaxDocumentPageHeight) }},
+		{name: "page_pixels", environment: "MAX_DOCUMENT_PAGE_PIXELS", defaultValue: 200_000_000, get: func(settings Config) uint64 { return settings.MaxDocumentPagePixels }},
+		{name: "document_pixels", environment: "MAX_DOCUMENT_PIXELS", defaultValue: 1_000_000_000, get: func(settings Config) uint64 { return settings.MaxDocumentPixels }},
+		{name: "ooxml_members", environment: "MAX_DOCUMENT_OOXML_MEMBERS", defaultValue: 10_000, get: func(settings Config) uint64 { return uint64(settings.MaxDocumentOOXMLMembers) }},
+		{name: "ooxml_member_bytes", environment: "MAX_DOCUMENT_OOXML_MEMBER_BYTES", defaultValue: 256 << 20, get: func(settings Config) uint64 { return settings.MaxDocumentOOXMLMemberBytes }},
+		{name: "ooxml_total_bytes", environment: "MAX_DOCUMENT_OOXML_TOTAL_BYTES", defaultValue: 1 << 30, get: func(settings Config) uint64 { return settings.MaxDocumentOOXMLTotalBytes }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, value := range []struct {
+				name string
+				raw  string
+				want uint64
+			}{
+				{name: "default", want: test.defaultValue},
+				{name: "custom", raw: "123", want: 123},
+				{name: "unlimited", raw: "0", want: 0},
+			} {
+				t.Run(value.name, func(t *testing.T) {
+					t.Setenv(test.environment, value.raw)
+					settings, err := Load()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := test.get(settings); got != value.want {
+						t.Fatalf("%s = %d, want %d", test.environment, got, value.want)
+					}
+				})
+			}
+
+			for _, value := range []string{"-1", "invalid"} {
+				t.Run("invalid_"+value, func(t *testing.T) {
+					t.Setenv(test.environment, value)
+					want := test.environment + " must be a non-negative integer"
+					if _, err := Load(); err == nil || err.Error() != want {
+						t.Fatalf("Load() error = %v, want %q", err, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLoadDocumentRenderTimeout(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "default", want: 300 * time.Second},
+		{name: "custom", value: "45.5", want: 45*time.Second + 500*time.Millisecond},
+		{name: "unlimited", value: "0", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("DOCUMENT_RENDER_TIMEOUT_SECONDS", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.DocumentRenderTimeout != test.want {
+				t.Fatalf("DocumentRenderTimeout = %s, want %s", settings.DocumentRenderTimeout, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"-1", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("DOCUMENT_RENDER_TIMEOUT_SECONDS", value)
+			if _, err := Load(); err == nil || err.Error() != "DOCUMENT_RENDER_TIMEOUT_SECONDS must be non-negative" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadLibreOfficeTimeout(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "default", want: 300 * time.Second},
+		{name: "custom", value: "45.5", want: 45*time.Second + 500*time.Millisecond},
+		{name: "unlimited", value: "0", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.LibreOfficeTimeout != test.want {
+				t.Fatalf("LibreOfficeTimeout = %s, want %s", settings.LibreOfficeTimeout, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"-1", "invalid"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS", value)
+			if _, err := Load(); err == nil || err.Error() != "DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS must be non-negative" {
 				t.Fatalf("Load() error = %v", err)
 			}
 		})

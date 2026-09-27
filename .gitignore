@@ -6,3 +6,5 @@
 *.test
 /tmp/
 _output/
+__pycache__/
+*.py[cod]
