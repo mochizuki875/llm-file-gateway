@@ -25,8 +25,8 @@ flowchart LR
 ```
 1. クライアントがFiles APIへファイルをアップロードする
 2. Gatewayがファイルを保存し、`file_id`と`status: "uploaded"`を返す
-3. Workerがファイル形式に応じたConverterで`ManifestPart`（変換画像および抽出テキスト）を生成する
-4. `ManifestPart`の生成が完了したら`status: "processed"`に更新する
+3. Workerがファイル形式に応じたConverterでアーティファクト（変換画像および抽出テキスト）を生成する
+4. アーティファクトの生成が完了したら`status: "processed"`に更新する
 5. クライアントが`file_id`を付与してResponsesまたはChat Completions APIを実行する
 6. `file_id`紐づくファイルの抽出テキストおよび変換画像を、それぞれプロンプトと`image_url`へ展開する
 7. リクエストをバックエンドのvLLMへ転送する
@@ -338,6 +338,29 @@ stateDiagram-v2
 - DBへのrecord保存後はHTTP request contextではなくservice lifecycle contextでenqueueするため、client切断後も変換は継続する。
 - retry可能な変換errorは1、2、4秒のexponential backoffで最大3回再試行する。ページ数・文字数・入力検証など決定的なerrorは再試行せず`failed`へ遷移する。
 
+### アーティファクトとfile_idの紐付け
+
+1つのfileは`GATEWAY_DATA_DIR`配下の専有directoryとSQLiteの1 recordで管理する。
+
+```text
+GATEWAY_DATA_DIR/
+├── gateway.db                   # SQLite (files table)
+└── files/
+    └── <tenant_id>/
+        └── <file_id>/           # 1 file = 1 dedicated directory
+            ├── source<ext>      # アップロードされた元ファイル (0600)
+            ├── manifest.json    # 変換結果のmanifest (0600)
+            └── derived/         # 変換成果物 (directory 0700 / file 0600)
+                ├── source-page-0001.png
+                ├── source-page-0001.txt
+                ├── source-page-0002.png
+                └── source-page-0002.txt
+```
+
+- `file_id`は`file_` + 32桁の16進数（16 byteの乱数）をupload時に生成する。
+- SQLiteの`files` tableは`id`（file_id）と`tenant_id`を組としてrecordを管理し、`source_path`と`manifest_path`に`GATEWAY_DATA_DIR`からの相対pathを保存する。変換画像と抽出テキストの実体は`derived/`配下にあり、`manifest.json`の各`ManifestPart`が`text_path` / `image_path`として`derived/`内のfile名を参照する。
+- file_idの検索は常に`(file_id, tenant_id)`の組で行う。認証有効時はAPI keyのSHA-256先頭32桁がtenant IDとなるため、他tenantのfile_idを指定してもrecordを参照できない。認証無効時は全fileがshared tenantへ統合される。
+
 ### 起動時の復旧
 
 - Gatewayの再起動時は、SQLiteに残る有効期限内の`uploaded`または`processing`状態の`file_id`をqueueへ追加し、変換を最初から再実行する。
@@ -482,7 +505,47 @@ Gatewayはrendererのdefault optionsを起点にし、未設定時はrendererと
 
 `document-image-renderer`は途中で失敗した場合に生成済み画像を残し、出力directory内の無関係なfileを削除しない。そのためGatewayは変換開始前に専有する`derived` directoryと同階層の`manifest.json`を削除して初期化する。変換、manifest生成、権限設定のいずれかが失敗した場合も両方を削除し、不完全な成果物を残さない。変換成功時はdirectoryを`0700`、配下のfileと`manifest.json`を`0600`にする。
 
-## Inference Expansion
+
+## 推論リクエスト
+
+### file_idからアーティファクトへの解決
+
+`file_id`を含む推論リクエストは、展開の前に次の順で変換成果物へ解決される。
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant API as Inference API
+  participant Files as files.Service
+  participant Store as SQLite
+  participant Disk as files/<tenant>/<file_id>/
+
+  Client->>API: input_file {file_id}
+  API->>Files: Resolve(file_id, tenant_id)
+  Files->>Store: Get(file_id, tenant_id)
+  Store-->>Files: record (status, manifest_path)
+  alt status=uploaded/processing
+    Files-->>API: 409 file_not_ready
+  else status=failed
+    Files-->>API: 422 file_processing_failed
+  else status=processed
+    Files->>Files: acquire read lease
+    Files->>Disk: read manifest.json
+    Files-->>API: record + manifest + release
+    API->>Disk: read derived/<text_path> / <image_path>
+    API->>API: expand into content parts
+    API->>Files: release lease
+  end
+```
+
+1. `files.Service.Resolve`が`(file_id, tenant_id)`でSQLiteからrecordを取得する。recordが存在しない場合は`404 file_not_found`を返す。
+2. statusが`uploaded` / `processing`なら`409 file_not_ready`、`failed`なら`422 file_processing_failed`を返す。推論で参照する前にクライアントは`GET /v1/files/{file_id}`で`status: "processed"`を確認する。
+3. `processed`ならread leaseを取得してから`manifest_path`の`manifest.json`を読み込む。leaseはDeleteやjanitorによるdirectory削除と推論中の読み込みの競合（TOCTOU）を防ぐ。
+4. manifestの各`ManifestPart`が参照する`derived/`配下のtext artifactとimage artifactを読み込み、content partへ展開する。読み込みが完了したらleaseを解放する。
+
+`file_data`と`file_url`はFiles APIの保存対象ではないため、この解決経路を通らない。代わりにrequest専用の一時directoryへsourceを保存し、同じrequest内でConverterの解決・検証・変換を同期的に実行してmanifestを生成する。一時directoryはrequest終了時に削除する。
+
+### Inference Expansion
 
 Responsesの`input_file`、Chat Completionsの`file`をcontent partへ展開する。
 
