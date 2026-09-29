@@ -21,6 +21,7 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/converter"
 	"github.com/mochizuki875/llm-file-gateway/internal/logging"
 	"github.com/mochizuki875/llm-file-gateway/internal/store"
+	"github.com/mochizuki875/llm-file-gateway/internal/workqueue"
 )
 
 // Service manages uploaded files: it stores them on disk, queues them for
@@ -29,7 +30,7 @@ type Service struct {
 	settings   config.Config
 	store      *store.Store
 	dispatcher *converter.Dispatcher
-	queue      chan conversionJob
+	queue      workqueue.Queue[conversionJob]
 	cancel     context.CancelFunc
 	wait       sync.WaitGroup
 
@@ -57,9 +58,9 @@ type Service struct {
 	// being deleted (TOCTOU between store lookup and lease acquisition).
 	deleting map[string]chan struct{}
 
-	// syncHandler is used for processing a single conversion job.
+	// convertHandler is used for processing a single conversion job.
 	// It is a field to allow injection for testing.
-	syncHandler func(ctx context.Context, job conversionJob) error
+	convertHandler func(ctx context.Context, job conversionJob) error
 
 	// afterPersist is invoked after the file record is persisted and before
 	// the conversion job is enqueued. It is used by tests to simulate a
@@ -99,20 +100,24 @@ type conversionJob struct {
 // maxRetries is the number of times a conversion job will be retried before it is dropped.
 const maxRetries = 3
 
-const defaultConversionQueueCapacity = 128
-
 // New creates a file service backed by the given store and converter dispatcher.
 func New(settings config.Config, dataStore *store.Store, dispatcher *converter.Dispatcher) *Service {
 	if dispatcher == nil {
 		panic("converter dispatcher must not be nil")
 	}
-	queueCapacity := settings.ConversionQueueCapacity
-	if queueCapacity <= 0 {
-		queueCapacity = defaultConversionQueueCapacity
+	service := &Service{
+		settings:    settings,
+		store:       dataStore,
+		dispatcher:  dispatcher,
+		retryCount:  make(map[string]int),
+		conversions: make(map[string]*fileLifecycle),
+		leases:      make(map[string]*fileLease),
+		deleting:    make(map[string]chan struct{}),
 	}
-	service := &Service{settings: settings, store: dataStore, dispatcher: dispatcher, queue: make(chan conversionJob, queueCapacity), retryCount: make(map[string]int), conversions: make(map[string]*fileLifecycle), leases: make(map[string]*fileLease), deleting: make(map[string]chan struct{})}
+
+	service.queue = workqueue.New[conversionJob](settings.ConversionQueueCapacity)
 	service.lifecycleCtx, service.lifecycleCancel = context.WithCancel(context.Background())
-	service.syncHandler = service.convert
+	service.convertHandler = service.convert
 	return service
 }
 
@@ -143,7 +148,7 @@ func (service *Service) Run(ctx context.Context, workers int) error {
 
 	// Start the worker goroutines for file conversion.
 	for i := 0; i < workers; i++ {
-		service.wait.Go(func() { service.worker(workerContext) })
+		service.wait.Go(func() { service.worker(workerContext, i+1) })
 	}
 
 	// Start the janitor goroutine for cleaning up expired files.
@@ -505,10 +510,8 @@ func (service *Service) endDeletion(id string, done chan struct{}) {
 // enqueue submits a conversion job to the worker queue, or drops it when the
 // context is already cancelled.
 func (service *Service) enqueue(ctx context.Context, job conversionJob) {
-	select {
-	case service.queue <- job:
+	if service.queue.Add(ctx, job) {
 		logging.V(ctx, 2, "file queued", "file_id", job.id)
-	case <-ctx.Done():
 	}
 }
 
@@ -522,8 +525,9 @@ func (service *Service) enqueueAfter(ctx context.Context, job conversionJob, aft
 	})
 }
 
-// worker runs a worker thread that just dequeues jobs, processes them, and marks them done.
-func (service *Service) worker(ctx context.Context) {
+// worker dequeues and processes jobs until the context is cancelled.
+func (service *Service) worker(ctx context.Context, id int) {
+	slog.Info("conversion worker started", "worker_id", id)
 	for service.processNextJob(ctx) {
 	}
 }
@@ -531,23 +535,25 @@ func (service *Service) worker(ctx context.Context) {
 // processNextJob dequeues a single conversion job and processes it.
 // It returns false when the context is cancelled or the queue is closed.
 func (service *Service) processNextJob(ctx context.Context) bool {
-	select {
-	case <-ctx.Done():
+	job, quit := service.queue.Get(ctx)
+	if quit {
 		return false
-	case job, ok := <-service.queue:
-		if !ok {
-			return false
-		}
-		// Each conversion runs under a per-file context so that Delete and
-		// the janitor can cancel a specific conversion without affecting
-		// conversions of other files.
-		fileCtx, cancel := context.WithCancel(ctx)
-		state := service.beginConversion(job.id, cancel)
-		err := service.syncHandler(fileCtx, job)
-		service.endConversion(job.id, state)
-		service.handleErr(ctx, err, job)
-		return true
 	}
+	err := service.processJob(ctx, job)
+	service.handleErr(ctx, err, job)
+	return true
+}
+
+// processJob runs one conversion under a per-file lifecycle.
+func (service *Service) processJob(ctx context.Context, job conversionJob) error {
+	// Each conversion runs under a per-file context so that Delete and the
+	// janitor can cancel a specific conversion without affecting conversions
+	// of other files.
+	fileCtx, cancel := context.WithCancel(ctx)
+	state := service.beginConversion(job.id, cancel)
+	defer service.endConversion(job.id, state)
+
+	return service.convertHandler(fileCtx, job)
 }
 
 // beginConversion registers an in-flight conversion for the given file and
@@ -560,8 +566,10 @@ func (service *Service) beginConversion(id string, cancel context.CancelFunc) *f
 	return state
 }
 
-// endConversion unregisters an in-flight conversion and signals any waiter.
+// endConversion cancels and unregisters an in-flight conversion, then signals
+// any waiter.
 func (service *Service) endConversion(id string, state *fileLifecycle) {
+	state.cancel()
 	service.lifecycleMu.Lock()
 	if current, ok := service.conversions[id]; ok && current == state {
 		delete(service.conversions, id)

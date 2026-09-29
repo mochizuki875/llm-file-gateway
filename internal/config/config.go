@@ -146,9 +146,9 @@ func Load() (Config, error) {
 	if err != nil || workers < 1 {
 		return Config{}, fmt.Errorf("CONVERSION_WORKERS must be a positive integer")
 	}
-	conversionQueueCapacity, err := envInt("CONVERSION_QUEUE_CAPACITY", 128)
-	if err != nil || conversionQueueCapacity < 1 {
-		return Config{}, fmt.Errorf("CONVERSION_QUEUE_CAPACITY must be a positive integer")
+	conversionQueueCapacity, err := envInt("CONVERSION_QUEUE_CAPACITY", 0)
+	if err != nil || conversionQueueCapacity < 0 {
+		return Config{}, fmt.Errorf("CONVERSION_QUEUE_CAPACITY must be a non-negative integer")
 	}
 	timeoutSeconds, err := envFloat("REQUEST_TIMEOUT_SECONDS", 300)
 	if err != nil || timeoutSeconds < 0 {

@@ -333,7 +333,7 @@ stateDiagram-v2
 
 ### 登録と非同期変換
 
-- queueはprocess内のbuffered channelであり、`CONVERSION_QUEUE_CAPACITY`（既定128）の変換待ちjobを保持する。実行中jobはこの件数に含まれない。`CONVERSION_WORKERS`（既定2）個のworker goroutineがqueueを共有し、どちらも正の整数に変更できる。
+- `internal/workqueue`のqueueはprocess内のFIFOであり、`CONVERSION_QUEUE_CAPACITY`（既定0）の変換待ちjobを保持する。`0`は無制限、正の整数は上限を表す。実行中jobはこの件数に含まれない。`CONVERSION_WORKERS`（既定2）個のworker goroutineがqueueを共有する。
 - 新規uploadでは最初に解決した`DocumentConverter`を`file_id`とともにqueueへ追加する。workerはconverterを再解決しない。
 - DBへのrecord保存後はHTTP request contextではなくservice lifecycle contextでenqueueするため、client切断後も変換は継続する。
 - retry可能な変換errorは1、2、4秒のexponential backoffで最大3回再試行する。ページ数・文字数・入力検証など決定的なerrorは再試行せず`failed`へ遷移する。

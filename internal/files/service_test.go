@@ -21,15 +21,31 @@ import (
 	"github.com/mochizuki875/llm-file-gateway/internal/store"
 )
 
-func TestNewUsesConfiguredQueueCapacity(t *testing.T) {
-	service := New(config.Config{ConversionQueueCapacity: 512}, nil, testDispatcher(t))
-	if capacity := cap(service.queue); capacity != 512 {
-		t.Fatalf("queue capacity = %d, want 512", capacity)
-	}
+func dequeueForTest(t *testing.T, queue interface {
+	Get(context.Context) (conversionJob, bool)
+}, timeout time.Duration) (conversionJob, bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return queue.Get(ctx)
+}
 
-	defaultService := New(config.Config{}, nil, testDispatcher(t))
-	if capacity := cap(defaultService.queue); capacity != defaultConversionQueueCapacity {
-		t.Fatalf("default queue capacity = %d, want %d", capacity, defaultConversionQueueCapacity)
+func TestWorkerLogsStart(t *testing.T) {
+	var output bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	service := New(config.Config{}, nil, testDispatcher(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	service.worker(ctx, 3)
+
+	logOutput := output.String()
+	for _, expected := range []string{`msg="conversion worker started"`, "worker_id=3"} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("log output = %q, missing %q", logOutput, expected)
+		}
 	}
 }
 
@@ -430,7 +446,7 @@ func testDispatcher(t *testing.T) *converter.Dispatcher {
 func testSettings(dataDir string) config.Config {
 	return config.Config{
 		DataDir: dataDir, FileTTL: 5 * time.Minute, MaxFileBytes: 1024,
-		MaxDocumentPages: 20, MaxDocumentTextChars: 500_000, Workers: 2,
+		MaxDocumentPages: 20, MaxDocumentTextChars: 500_000, Workers: 2, ConversionQueueCapacity: 128,
 	}
 }
 
@@ -464,13 +480,12 @@ func TestCreateStoresFileAndEnqueues(t *testing.T) {
 	if string(content) != "hello world" {
 		t.Fatalf("source content = %q", content)
 	}
-	select {
-	case job := <-service.queue:
-		if job.id != record.ID || job.documentConverter == nil {
-			t.Fatalf("queued job = %#v", job)
-		}
-	case <-time.After(time.Second):
+	job, quit := dequeueForTest(t, service.queue, time.Second)
+	if quit {
 		t.Fatal("conversion job was not enqueued")
+	}
+	if job.id != record.ID || job.documentConverter == nil {
+		t.Fatalf("queued job = %#v", job)
 	}
 }
 
@@ -1153,13 +1168,12 @@ func TestHandleErrSchedulesRetry(t *testing.T) {
 	if service.retries("file_retry") != 1 {
 		t.Fatalf("retries = %d, want 1", service.retries("file_retry"))
 	}
-	select {
-	case job := <-service.queue:
-		if job.id != "file_retry" {
-			t.Fatalf("queued job = %#v", job)
-		}
-	case <-time.After(2 * time.Second):
+	job, quit := dequeueForTest(t, service.queue, 2*time.Second)
+	if quit {
 		t.Fatal("retry job was not re-enqueued")
+	}
+	if job.id != "file_retry" {
+		t.Fatalf("queued job = %#v", job)
 	}
 }
 
@@ -1417,7 +1431,7 @@ func TestDeleteWaitsForActiveConversion(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+	service.convertHandler = func(ctx context.Context, job conversionJob) error {
 		close(started)
 		<-release
 		return nil
@@ -1454,6 +1468,25 @@ func TestDeleteWaitsForActiveConversion(t *testing.T) {
 	}
 }
 
+func TestProcessNextJobCancelsConversionContext(t *testing.T) {
+	service := New(config.Config{}, nil, testDispatcher(t))
+	var conversionCtx context.Context
+	service.convertHandler = func(ctx context.Context, job conversionJob) error {
+		conversionCtx = ctx
+		return nil
+	}
+	service.enqueue(service.lifecycle(), conversionJob{id: "file_complete"})
+
+	if !service.processNextJob(context.Background()) {
+		t.Fatal("processNextJob() = false, want true")
+	}
+	select {
+	case <-conversionCtx.Done():
+	default:
+		t.Fatal("conversion context was not cancelled after processing")
+	}
+}
+
 func TestDeleteCancelsActiveConversion(t *testing.T) {
 	dataDir := t.TempDir()
 	dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
@@ -1481,7 +1514,7 @@ func TestDeleteCancelsActiveConversion(t *testing.T) {
 	}
 
 	started := make(chan struct{})
-	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+	service.convertHandler = func(ctx context.Context, job conversionJob) error {
 		close(started)
 		<-ctx.Done()
 		return ctx.Err()
@@ -1528,7 +1561,7 @@ func TestTTLExpirationDuringConversion(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+	service.convertHandler = func(ctx context.Context, job conversionJob) error {
 		close(started)
 		<-release
 		return nil
@@ -1624,10 +1657,8 @@ func TestRetryDoesNotResurrectDeletedFile(t *testing.T) {
 	if service.retries(record.ID) != 0 {
 		t.Fatalf("retries = %d, want 0", service.retries(record.ID))
 	}
-	select {
-	case job := <-service.queue:
+	if job, quit := dequeueForTest(t, service.queue, 10*time.Millisecond); !quit {
 		t.Fatalf("retry job was enqueued for a deleted file: %#v", job)
-	default:
 	}
 	if current, err := dataStore.GetInternal(context.Background(), record.ID); err != nil || current != nil {
 		t.Fatalf("record = %#v, %v; want nil", current, err)
@@ -1664,7 +1695,7 @@ func TestDeleteDoesNotBlockOtherFiles(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+	service.convertHandler = func(ctx context.Context, job conversionJob) error {
 		close(started)
 		<-release
 		return nil
@@ -1703,7 +1734,7 @@ func TestCreateEnqueuesAfterRequestContextCancelled(t *testing.T) {
 	// Simulate a client disconnect immediately after persistence succeeds:
 	// the request context is cancelled before the conversion job is enqueued.
 	service.afterPersist = cancel
-	service.syncHandler = func(ctx context.Context, job conversionJob) error {
+	service.convertHandler = func(ctx context.Context, job conversionJob) error {
 		if err := ctx.Err(); err != nil {
 			t.Fatalf("conversion ran with cancelled context: %v", err)
 		}
@@ -1714,13 +1745,12 @@ func TestCreateEnqueuesAfterRequestContextCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case job := <-service.queue:
-		if job.id != record.ID {
-			t.Fatalf("queued job = %#v, want %s", job, record.ID)
-		}
-	case <-time.After(time.Second):
+	job, quit := dequeueForTest(t, service.queue, time.Second)
+	if quit {
 		t.Fatal("conversion job was not enqueued after request context cancellation")
+	}
+	if job.id != record.ID {
+		t.Fatalf("queued job = %#v, want %s", job, record.ID)
 	}
 }
 

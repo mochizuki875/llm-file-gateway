@@ -16,7 +16,8 @@ LLM File Gateway is a Go gateway that provides an OpenAI Files API-compatible in
 | `cmd/llm-file-gateway` | Process lifecycle and HTTP server startup |
 | `internal/config` | Environment variable validation (`config.Load`) |
 | `internal/store` | SQLite schema and tenant-aware CRUD |
-| `internal/files` | File storage, conversion queue, workers, janitor |
+| `internal/files` | File storage, conversion workers, janitor |
+| `internal/workqueue` | Context-aware bounded and unbounded FIFO queues |
 | `internal/converter` | Converter registry, dispatcher, shared conversion helpers, format converters and extractors |
 | `internal/server` | Files/Responses/Chat APIs, file expansion, public URL fetch, vLLM proxy |
 | `internal/apierror` | OpenAI-format errors |

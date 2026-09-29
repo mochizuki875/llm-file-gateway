@@ -111,7 +111,7 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | `DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS` | No | `300` | Office変換で使用するLibreOfficeのtimeout(sec)（`0`で無制限） |
 | `DOCUMENT_TEXT_EXTRACTION_ENABLED` | No | `true` | PDFとOfficeからテキストを抽出するか |
 | `CONVERSION_WORKERS` | No | `2` | 並行してファイルを変換するworker数。正の整数で変更可能 |
-| `CONVERSION_QUEUE_CAPACITY` | No | `128` | workerの処理開始を待つ変換jobをqueueに保持できる件数。正の整数で変更可能 |
+| `CONVERSION_QUEUE_CAPACITY` | No | `0` | workerの処理開始を待つ変換jobをqueueに保持できる件数（`0`で無制限） |
 | `REQUEST_TIMEOUT_SECONDS` | No | `300` | vLLM通信のtimeout。streamingではstream全体に適用（`0`で無制限） |
 | `LOGLEVEL` | No | `0` | ログverbosity（`0`: 通常、`1`: DEBUG、`2`: 高頻度の詳細ログ） |
 

@@ -212,7 +212,8 @@ func TestLoadConversionQueueCapacity(t *testing.T) {
 		value string
 		want  int
 	}{
-		{name: "default", want: 128},
+		{name: "default", want: 0},
+		{name: "unlimited", value: "0", want: 0},
 		{name: "custom", value: "512", want: 512},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -227,10 +228,10 @@ func TestLoadConversionQueueCapacity(t *testing.T) {
 		})
 	}
 
-	for _, value := range []string{"0", "-1", "invalid"} {
+	for _, value := range []string{"-1", "invalid"} {
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Setenv("CONVERSION_QUEUE_CAPACITY", value)
-			if _, err := Load(); err == nil || err.Error() != "CONVERSION_QUEUE_CAPACITY must be a positive integer" {
+			if _, err := Load(); err == nil || err.Error() != "CONVERSION_QUEUE_CAPACITY must be a non-negative integer" {
 				t.Fatalf("Load() error = %v", err)
 			}
 		})
