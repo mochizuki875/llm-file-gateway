@@ -95,7 +95,7 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | `GATEWAY_DATA_DIR` | No | `gateway-data` | SQLiteとファイルの保存先ディレクトリ |
 | `FILE_TTL_SECONDS` | No | `300` | デフォルトのファイル保持期間(sec)および`expires_after.seconds`で指定可能な上限値（`0`で無制限） |
 | `MAX_FILE_BYTES` | No | `52428800`(50 MiB) | 1ファイルの最大サイズ(bytes)（`0`で無制限） |
-| `MAX_REQUEST_BODY_BYTES` | No | `MAX_FILE_BYTES`の4倍 | 推論リクエスト(`/v1/responses`、`/v1/chat/completions`)のボディ全体の最大サイズ(bytes)。複数の`file_data`を含む場合の合計上限（`0`で無制限） |
+| `MAX_REQUEST_BODY_BYTES` | No | `MAX_FILE_BYTES`の4倍 | ファイル参照を含む`/v1/responses`、`/v1/chat/completions`への推論リクエストのボディ全体の最大サイズ(bytes)。JSONおよびBase64化されたfile_dataを含む（ファイル参照なしは適用対象外、0で無制限）|
 | `MAX_DOCUMENT_PAGES` | No | `50` | Gatewayで受け付けるPDF/Officeの最大ページ数（`0`で無制限） |
 | `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | 1ファイルから抽出するテキストの最大文字数（`0`で無制限） |
 | `MAX_DOCUMENT_PDF_BYTES` | No | `134217728` (128 MiB) | rendererが処理するPDFの最大サイズ(bytes)（`0`で無制限） |

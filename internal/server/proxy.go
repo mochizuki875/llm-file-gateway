@@ -41,6 +41,12 @@ func (server *Server) passthrough(response http.ResponseWriter, request *http.Re
 		writeError(response, apierror.New(405, "method_not_allowed", "Method not allowed for the Files API.", ""))
 		return
 	}
+	server.forwardRequest(response, request, path, false, false)
+}
+
+// forwardRequest forwards a request body without transforming it. Callers are
+// responsible for authenticating gateway clients before invoking it.
+func (server *Server) forwardRequest(response http.ResponseWriter, request *http.Request, path string, stream, inference bool) {
 	upstreamURL := strings.TrimRight(server.settings.VLLMBaseURL.String(), "/") + "/" + path
 	if request.URL.RawQuery != "" {
 		upstreamURL += "?" + request.URL.RawQuery
@@ -64,9 +70,21 @@ func (server *Server) passthrough(response http.ResponseWriter, request *http.Re
 		return
 	}
 	defer func() { _ = upstream.Body.Close() }()
-	upstreamBody := server.logUpstreamErrorResponse(upstream, "upstream returned error", "method", request.Method, "path", request.URL.Path)
+	message := "upstream returned error"
+	attributes := []any{"method", request.Method, "path", request.URL.Path}
+	if inference {
+		message = "upstream inference returned error"
+		attributes = []any{"endpoint", path}
+	}
+	upstreamBody := server.logUpstreamErrorResponse(upstream, message, attributes...)
 	copyHeaders(response.Header(), upstream.Header)
 	response.WriteHeader(upstream.StatusCode)
+	if stream {
+		if _, err := io.Copy(flushWriter{response: response, controller: http.NewResponseController(response)}, upstreamBody); err != nil {
+			slog.Debug("upstream stream copy interrupted", "endpoint", path, "error", err)
+		}
+		return
+	}
 	if _, err := io.Copy(response, upstreamBody); err != nil {
 		slog.Debug("upstream response copy interrupted", "method", request.Method, "path", request.URL.Path, "error", err)
 	}

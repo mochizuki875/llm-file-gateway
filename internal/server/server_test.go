@@ -540,11 +540,20 @@ func TestInferenceForwardsSafeRequestHeaders(t *testing.T) {
 			if receivedHost != upstreamURL.Host {
 				t.Errorf("upstream Host = %q, want %q", receivedHost, upstreamURL.Host)
 			}
-			if got := receivedHeader.Get("Content-Type"); got != "application/json" {
-				t.Errorf("upstream Content-Type = %q", got)
-			}
-			if receivedLength != int64(len(receivedBody)) || receivedLength == 1 {
-				t.Errorf("upstream Content-Length = %d, body length = %d", receivedLength, len(receivedBody))
+			if strings.Contains(test.name, "without_file") {
+				if got := receivedHeader.Get("Content-Type"); got != "text/plain" {
+					t.Errorf("upstream Content-Type = %q, want text/plain", got)
+				}
+				if receivedLength != -1 {
+					t.Errorf("upstream Content-Length = %d, want unknown length", receivedLength)
+				}
+			} else {
+				if got := receivedHeader.Get("Content-Type"); got != "application/json" {
+					t.Errorf("upstream Content-Type = %q", got)
+				}
+				if receivedLength != int64(len(receivedBody)) || receivedLength == 1 {
+					t.Errorf("upstream Content-Length = %d, body length = %d", receivedLength, len(receivedBody))
+				}
 			}
 		})
 	}
@@ -946,19 +955,22 @@ func TestInferencePreservesLargeJSONIntegers(t *testing.T) {
 	}
 }
 
-func TestInferenceRequiresSingleJSONDocument(t *testing.T) {
+func TestInferenceWithoutFileLeavesJSONValidationToUpstream(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		body       string
-		wantStatus int
+		name string
+		body string
 	}{
-		{name: "trailing_whitespace", body: "{\"model\":\"test-model\",\"input\":\"hello\"}\n\t", wantStatus: http.StatusOK},
-		{name: "second_object", body: `{"model":"test-model","input":"hello"} {}`, wantStatus: http.StatusBadRequest},
-		{name: "second_number", body: `{"model":"test-model","input":"hello"} 123`, wantStatus: http.StatusBadRequest},
-		{name: "trailing_garbage", body: `{"model":"test-model","input":"hello"} garbage`, wantStatus: http.StatusBadRequest},
+		{name: "trailing_whitespace", body: "{\"model\":\"test-model\",\"input\":\"hello\"}\n\t"},
+		{name: "second_object", body: `{"model":"test-model","input":"hello"} {}`},
+		{name: "second_number", body: `{"model":"test-model","input":"hello"} 123`},
+		{name: "trailing_garbage", body: `{"model":"test-model","input":"hello"} garbage`},
+		{name: "invalid_json", body: `not json`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			var receivedBody string
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				body, _ := io.ReadAll(request.Body)
+				receivedBody = string(body)
 				writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
 			}))
 			defer upstream.Close()
@@ -970,8 +982,8 @@ func TestInferenceRequiresSingleJSONDocument(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(test.body))
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)
-			if response.Code != test.wantStatus {
-				t.Fatalf("status = %d: %s, want %d", response.Code, response.Body.String(), test.wantStatus)
+			if response.Code != http.StatusOK || receivedBody != test.body {
+				t.Fatalf("status/body = %d/%q, want %d/%q", response.Code, receivedBody, http.StatusOK, test.body)
 			}
 		})
 	}
@@ -1837,24 +1849,12 @@ func TestExpandChatRejectsFileURL(t *testing.T) {
 	}
 }
 
-func TestExpandChatRejectsNonArrayMessages(t *testing.T) {
-	settings, dataStore, service := testDependencies(t)
-	settings.VLLMModel = "test-model"
-	handler := NewHandler(settings, dataStore, service)
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","messages":"hello"}`))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
-	}
-}
-
-func TestResponsesWithoutFileDoesNotInjectInstruction(t *testing.T) {
-	var upstreamPayload map[string]any
+func TestChatWithoutFileLeavesValidationToUpstream(t *testing.T) {
+	const body = `{"model":"test-model","messages":"hello"}`
+	var receivedBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
-			t.Error(err)
-		}
+		content, _ := io.ReadAll(request.Body)
+		receivedBody = string(content)
 		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
 	}))
 	defer upstream.Close()
@@ -1862,47 +1862,70 @@ func TestResponsesWithoutFileDoesNotInjectInstruction(t *testing.T) {
 	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
 	settings.VLLMModel = "test-model"
 	handler := NewHandler(settings, dataStore, service)
-
-	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":"Hello"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
-	}
-	if _, exists := upstreamPayload["instructions"]; exists {
-		t.Fatalf("instructions injected for a file-free request: %#v", upstreamPayload["instructions"])
-	}
-	if upstreamPayload["input"] != "Hello" {
-		t.Fatalf("input = %#v, want unchanged", upstreamPayload["input"])
+	if response.Code != http.StatusOK || receivedBody != body {
+		t.Fatalf("status/body = %d/%q, want %d/%q", response.Code, receivedBody, http.StatusOK, body)
 	}
 }
 
-func TestChatWithoutFileDoesNotInjectSystemMessage(t *testing.T) {
-	var upstreamPayload map[string]any
+func TestInferenceWithoutFilePassesThroughRequest(t *testing.T) {
+	for _, test := range []struct {
+		name, endpoint, body string
+	}{
+		{"responses", "/v1/responses?include=reasoning", `{"model":"any-model","input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]}],"custom":{"number":1.0e+10}}`},
+		{"chat", "/v1/chat/completions?n=2", `{"model":"any-model","messages":[{"role":"user","content":[{"type":"text","text":"Hello"}]}],"custom":{"number":1.0e+10}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var receivedBody, receivedQuery string
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				body, _ := io.ReadAll(request.Body)
+				receivedBody = string(body)
+				receivedQuery = request.URL.RawQuery
+				writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+			}))
+			defer upstream.Close()
+			settings, dataStore, service := testDependencies(t)
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			settings.VLLMModel = "test-model"
+			handler := NewHandler(settings, dataStore, service)
+
+			request := httptest.NewRequest(http.MethodPost, test.endpoint, strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+			if receivedBody != test.body || receivedQuery != request.URL.RawQuery {
+				t.Fatalf("upstream body/query = %q/%q, want %q/%q", receivedBody, receivedQuery, test.body, request.URL.RawQuery)
+			}
+		})
+	}
+}
+
+func TestInferenceWithoutFileIgnoresRequestBodyLimit(t *testing.T) {
+	var receivedBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if err := json.NewDecoder(request.Body).Decode(&upstreamPayload); err != nil {
-			t.Error(err)
-		}
-		writeJSON(response, http.StatusOK, map[string]any{"id": "chat_1"})
+		body, _ := io.ReadAll(request.Body)
+		receivedBody = string(body)
+		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
 	}))
 	defer upstream.Close()
 	settings, dataStore, service := testDependencies(t)
 	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
-	settings.VLLMModel = "test-model"
+	settings.MaxRequestBodyBytes = 1
 	handler := NewHandler(settings, dataStore, service)
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"Hello"}]}`))
+	body := `{"model":"any-model","input":"Hello"}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
 	}
-	messages := upstreamPayload["messages"].([]any)
-	if len(messages) != 1 {
-		t.Fatalf("messages = %#v, want the original single message", messages)
-	}
-	if messages[0].(map[string]any)["role"] != "user" {
-		t.Fatalf("message = %#v, want unchanged user message", messages[0])
+	if receivedBody != body {
+		t.Fatalf("upstream body = %q, want %q", receivedBody, body)
 	}
 }
 

@@ -547,7 +547,7 @@ sequenceDiagram
 
 ### Inference Expansion
 
-Responsesの`input_file`、Chat Completionsの`file`をcontent partへ展開する。
+Responsesの`input_file`、Chat Completionsの`file`をcontent partへ展開する。ファイル参照は任意であり、`input_file` / `file` partを1つも含まないリクエストは専用の解釈・再シリアライズを行わず、request body、query parameter、通常のheaderを保ったままvLLMへpassthroughする。この場合`documentInstruction`も注入しない（注入は実際にファイルを展開した場合のみ行う）。`input`が文字列の場合も同様に展開対象のpartが存在しないため、文字列のまま転送する。
 
 1. 抽出テキストを`<document ...>`で囲んで展開する
 2. 変換画像がある場合は`image_url`にbase64 data URLとして展開する（全artifact合計で`MAX_DOCUMENT_PAGES`、既定50個まで）
@@ -557,7 +557,7 @@ Responsesの`input_file`、Chat Completionsの`file`をcontent partへ展開す�
 
 Responsesは`file_id`、`file_data`、`file_url`、Chatは`file_id`と`file_data`を受け付ける。`file_url`はuserinfoなしのHTTPS:443、公開IP、最大4 redirectに限定し、各redirectを再検証する。DNSで得た全addressを検証し、接続時も再解決・再検証したIPへ直接dialすることでDNS rebindingを防ぐ。なおOpenAIのChat Completions APIは`file` inputをサポートしないが、GatewayはChat Completionsでも`file_id`と`file_data`を拡張として受け付ける。
 
-`file_data`はbase64でエンコードされたファイル内容をリクエストボディに含めるため、複数ファイルを同時に送るとボディが`MAX_FILE_BYTES`の数倍に膨らむ。このため推論リクエストのボディ全体には`MAX_REQUEST_BODY_BYTES`（既定`MAX_FILE_BYTES`の4倍）を適用する。`MAX_FILE_BYTES`は1ファイルあたりの上限、`MAX_REQUEST_BODY_BYTES`はリクエスト全体の上限として機能する。1ファイルのデコード後サイズが`MAX_FILE_BYTES`を超えると`file_too_large`（400）で拒否され、リクエストボディ全体が`MAX_REQUEST_BODY_BYTES`を超えると`request_too_large`（400）で拒否される。
+`file_data`はbase64でエンコードされたファイル内容をリクエストボディに含めるため、複数ファイルを同時に送るとボディが`MAX_FILE_BYTES`の数倍に膨らむ。このため、ファイル参照を含む推論リクエストのボディ全体には`MAX_REQUEST_BODY_BYTES`（既定`MAX_FILE_BYTES`の4倍）を適用する。ファイル参照を含まないpassthroughリクエストにはこの制限を適用しない。`MAX_FILE_BYTES`は1ファイルあたりの上限、`MAX_REQUEST_BODY_BYTES`はファイル参照を含むリクエスト全体の上限として機能する。1ファイルのデコード後サイズが`MAX_FILE_BYTES`を超えると`file_too_large`（400）で拒否され、ファイル参照を含むリクエストボディ全体が`MAX_REQUEST_BODY_BYTES`を超えると`request_too_large`（400）で拒否される。
 
 ### Responses API（`POST {VLLM_BASE_URL}/responses`）
 ファイルを展開した場合、`documentInstruction`を`instructions`の先頭へ注入する。
@@ -612,9 +612,35 @@ Responsesは`file_id`、`file_data`、`file_url`、Chatは`file_id`と`file_data
 
 ## Proxy
 
-Gatewayが専用handlerを登録しているFiles APIのmethod/pathと、`POST /v1/responses`、`POST /v1/chat/completions`を除く`/v1/*`はvLLMへ転送する。したがって、Responses/Chatの別methodや未登録のendpointもpassthrough対象となる。ただし`/v1/files`とその配下は、専用handlerに一致しないmethod/pathを405 `method_not_allowed`で拒否し、vLLMへ転送しない。
+`/v1/*`へのrequestは、専用handlerで処理するか、vLLMへpassthroughするかのいずれかで扱う。
 
-passthrough requestはmethod、raw query、body、end-to-end headerを維持する。ただしクライアントの`Authorization`は削除して`VLLM_API_KEY`によるBearer認証へ置換する。固定のhop-by-hop headerと`Connection` headerが列挙するheaderはrequest/responseの両方向で除外する。`Host`はvLLMのhostへ置き換え、`Content-Length`は転送bodyからGoのHTTP clientが設定する。
+| 対象 | 経路 | 処理 |
+| --- | --- | --- |
+| Files APIの登録済みmethod/path | 専用handler | SQLiteとlocal filesystemで処理し、vLLMへ転送しない。 |
+| `POST /v1/responses`、`POST /v1/chat/completions` | 専用handler | ファイル参照を含む場合は検証・展開してからvLLMへ転送し、含まない場合は元のcontentのままvLLMへ転送する |
+| 上記以外の`/v1/*` | passthrough | requestを検証せずvLLMへそのまま転送する |
+
+routeは`NewHandler`が`http.ServeMux`へ登録する。`POST /v1/responses`は`Server.responses`、`POST /v1/chat/completions`は`Server.chatCompletions`が処理し、上記以外の`/v1/*`は`Server.passthrough`が処理する。
+
+### 専用handler
+
+#### Files API
+
+- `/v1/files`とその配下は、`Server.passthrough`が専用handlerに一致しないmethod/pathを405 `method_not_allowed`で拒否し、vLLMへ転送しない。
+- 登録済みmethod/path（`POST /v1/files`、`GET /v1/files`、`GET /v1/files/{file_id}`、`GET /v1/files/{file_id}/content`、`DELETE /v1/files/{file_id}`）は、SQLiteとlocal filesystemで処理し、vLLMへ転送しない。
+
+#### Responses / Chat Completions
+
+- `Server.handleInference`（`inference.go`）が`POST /v1/responses`と`POST /v1/chat/completions`の共通entry pointであり、ファイル参照（`file_id`、`file_data`、`file_url`）を含まないリクエストも受理する。JSON parseはファイル参照の有無を判定するためだけに行い、parseに失敗した場合もエラーにせず元のbodyをそのまま転送する。ファイル参照を含まない場合、payloadの展開と`documentInstruction`の注入や`model`検証と`MAX_REQUEST_BODY_BYTES`検証も適用されず、元のcontentのまま`Server.forwardRequest`でvLLMへ転送する。つまりファイル入力は任意（optional）であり、ファイルなしの通常の推論リクエストも同じendpointで処理できる。
+- ファイル参照を展開した場合は`Server.forwardJSON`で再シリアライズしたpayloadをvLLMへ転送する。
+
+### passthrough
+
+- `Server.passthrough`（`proxy.go`）が`POST /v1/responses`、`POST /v1/chat/completions`を除く`/v1/*`のうち、`/v1/files`とその配下以外を`Server.forwardRequest`へ委譲する。Responses/Chatの別methodや未登録のendpointはpassthroughされる。
+- requestはmethod、raw query、body、end-to-end headerを維持する。
+- クライアントの`Authorization`は削除して`VLLM_API_KEY`によるBearer認証へ置換する。
+- `copyHeaders`が固定のhop-by-hop headerと`Connection` headerが列挙するheaderをrequest/responseの両方向で除外する。`Host`と`Content-Length`も転送対象から除外する。
+- `Host`はvLLMのhostへ置き換え、`Content-Length`は転送bodyからGoのHTTP clientが設定する。
 
 ## Logging
 

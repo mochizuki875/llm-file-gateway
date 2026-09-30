@@ -1,9 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,27 +44,35 @@ func (server *Server) handleInference(response http.ResponseWriter, request *htt
 		return
 	}
 	var payload map[string]any
-	// The body limit must accommodate the base64 expansion of inline
-	// file_data (about 4/3 of the decoded size) plus JSON overhead; the
-	// decoded size itself is enforced per file in prepareDocument. A limit
-	// of 0 means unlimited, in which case no MaxBytesReader is applied.
-	if limit := server.maxInlineBodyBytes(); limit > 0 {
-		request.Body = http.MaxBytesReader(response, request.Body, limit)
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		writeError(response, apierror.New(400, "invalid_request", "Request body must be valid JSON.", ""))
+		return
 	}
-	decoder := json.NewDecoder(request.Body)
+	forwardOriginal := func(stream bool) {
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		server.forwardRequest(response, request, endpoint, stream, true)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
-		var maxBytesError *http.MaxBytesError
-		if errors.As(err, &maxBytesError) {
-			writeError(response, apierror.RequestBodyTooLarge(server.maxInlineBodyBytes()))
-			return
-		}
-		writeError(response, apierror.New(400, "invalid_request", "Request body must be valid JSON.", ""))
+		forwardOriginal(false)
 		return
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		writeError(response, apierror.New(400, "invalid_request", "Request body must contain a single JSON document.", ""))
+		forwardOriginal(false)
+		return
+	}
+	if !hasFileReference(endpoint, payload) {
+		stream, _ := payload["stream"].(bool)
+		forwardOriginal(stream)
+		return
+	}
+	// The body limit is only needed for requests that contain inline file_data.
+	// File-free requests are forwarded without applying gateway size limits.
+	if limit := server.maxInlineBodyBytes(); limit > 0 && int64(len(body)) > limit {
+		writeError(response, apierror.RequestBodyTooLarge(limit))
 		return
 	}
 	if payload["model"] != server.settings.VLLMModel {
@@ -79,7 +87,6 @@ func (server *Server) handleInference(response http.ResponseWriter, request *htt
 			}
 		}
 	}()
-	var err error
 	if endpoint == "responses" {
 		var expandedFile bool
 		expandedFile, err = server.expandResponses(request.Context(), payload, tenantID, &temporary)
@@ -103,6 +110,37 @@ func (server *Server) handleInference(response http.ResponseWriter, request *htt
 		return
 	}
 	server.forwardJSON(response, request, endpoint, payload)
+}
+
+// hasFileReference reports whether a payload contains a file part the gateway
+// must expand before sending the request upstream.
+func hasFileReference(endpoint string, payload map[string]any) bool {
+	var items []any
+	if endpoint == "responses" {
+		items, _ = payload["input"].([]any)
+	} else {
+		items, _ = payload["messages"].([]any)
+	}
+	for _, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := item["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawPart := range content {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if (endpoint == "responses" && part["type"] == "input_file") || (endpoint == "chat/completions" && part["type"] == "file") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // expandResponses replaces input_file parts in a Responses API payload with
