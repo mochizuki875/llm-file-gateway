@@ -1,5 +1,7 @@
 # LLM File Gateway設計
 
+[English](DESIGN.md) | 日本語
+
 ## Architecture
 
 ```mermaid
@@ -28,10 +30,10 @@ flowchart LR
 3. Workerがファイル形式に応じたConverterでアーティファクト（変換画像および抽出テキスト）を生成する
 4. アーティファクトの生成が完了したら`status: "processed"`に更新する
 5. クライアントが`file_id`を付与してResponsesまたはChat Completions APIを実行する
-6. `file_id`紐づくファイルの抽出テキストおよび変換画像を、それぞれプロンプトと`image_url`へ展開する
+6. `file_id`に紐づくファイルの抽出テキストおよび変換画像を、それぞれプロンプトと`image_url`へ展開する
 7. リクエストをバックエンドのvLLMへ転送する
 
-GatewayはFiles APIに送信された変換前のファイルと`file_id`を直接vLLMへ送信しません。`file_data`と`file_url`でファイル情報が送信された場合は同期処理でファイルの保存、変換、リクエスト転送削除を行います。Files APIで保存したファイルはクライアントがFiles APIで指定したファイル保持期間(`expires_after.seconds`)経過後に削除されます。(指定されなかった場合は`FILE_TTL_SECONDS`がデフォルト値として使用されます。)
+GatewayはFiles APIに送信された変換前のファイルと`file_id`を直接vLLMへ送信しません。`file_data`と`file_url`でファイル情報が送信された場合は同期処理でファイルの保存、変換、リクエスト転送、削除を行います。Files APIで保存したファイルはクライアントがFiles APIで指定したファイル保持期間(`expires_after.seconds`)経過後に削除されます。(指定されなかった場合は`FILE_TTL_SECONDS`がデフォルト値として使用されます。)
 
 ## Packages
 

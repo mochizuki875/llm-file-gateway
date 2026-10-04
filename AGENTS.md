@@ -7,7 +7,7 @@ LLM File Gateway is a Go gateway that provides an OpenAI Files API-compatible in
 - Module: `github.com/mochizuki875/llm-file-gateway` (Go 1.27+)
 - Key dependency: `github.com/mochizuki875/document-image-renderer` (PDFium/WASM + LibreOffice for PDF/Office rendering)
 - SQLite via `modernc.org/sqlite` (CGO-free)
-- See `README.md` for user-facing docs and `DESIGN.md` for architecture details.
+- See `README.md` for user-facing docs and `docs/DESIGN.md` for architecture details.
 
 ## Architecture
 
@@ -49,6 +49,7 @@ make run              # run the gateway
 ## Conventions
 
 - Keep changes small and update related tests and files.
+- This project maintains English and Japanese documentation in pairs: `README.md` ↔ `docs/README-ja.md` and `docs/DESIGN.md` ↔ `docs/DESIGN-ja.md`. When changing one, always apply the equivalent change to the other so both stay in sync.
 - When adding a format:
   1. Text-like format → add an `Extractor` in `internal/converter/extractor/` and register via `newTextConverter` in `text_common.go`.
   2. Image → use `validateImage`/`convertImage` from `image_common.go`.
