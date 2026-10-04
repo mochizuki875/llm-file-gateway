@@ -34,10 +34,4 @@ services:
       CONVERSION_QUEUE_CAPACITY: "${CONVERSION_QUEUE_CAPACITY:-0}"
       REQUEST_TIMEOUT_SECONDS: "${REQUEST_TIMEOUT_SECONDS:-300}"
       LOGLEVEL: "${LOGLEVEL:-0}"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
     restart: unless-stopped

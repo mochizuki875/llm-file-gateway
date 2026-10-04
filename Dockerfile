@@ -27,7 +27,6 @@ LABEL org.opencontainers.image.source="https://github.com/mochizuki875/llm-file-
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
-        curl \
         fontconfig \
         fonts-crosextra-carlito \
         fonts-liberation \
