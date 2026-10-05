@@ -314,12 +314,15 @@ Conversion results are stored in `manifest.json` with schema version 1. The sche
 - The manifest and artifacts are output to a dedicated directory per input; on conversion failure, the shared processing deletes intermediate artifacts.
 - Each part's `page_number`, `image_path`, `width`, `height`, `media_type`, and `sha256` are `null` for text artifacts without images.
 - `text_path` is an empty string for rendered artifacts with text extraction disabled.
+- `Result.Warnings` and `Manifest.Warnings` are extension points for converters to report non-fatal conversion issues; built-in converters currently return no warnings. A manifest without any `documents` is rejected during inference expansion.
 
 ## File Lifecycle
 
 ### State Transitions
 
 The Files API returns `uploaded` after storing. The worker updates the status to `processing` when conversion starts and to `processed` after the manifest is persisted. If conversion fails, the status is updated to `failed`. `deleted` at deletion time is a conceptual state on the API; in the DB, `deleted_at` is set to make the record invisible, and after waiting for conversion and read leases to finish, the record is physically deleted.
+
+The `status` field exposed by the Files API normalizes these internal states: `uploaded` and `processing` are both returned as `uploaded`, `processed` is returned as `processed`, and `failed` is returned as `error` with the error message in `status_details`.
 
 ```mermaid
 stateDiagram-v2
@@ -512,7 +515,7 @@ The Gateway starts from the renderer's default options and maintains the same de
 
 ### Resolving file_id to Artifacts
 
-Inference requests containing `file_id` are resolved to conversion artifacts in the following order before expansion.
+Inference requests containing `file_id` are processed in the following order.
 
 ```mermaid
 sequenceDiagram
@@ -520,30 +523,60 @@ sequenceDiagram
   participant API as Inference API
   participant Files as files.Service
   participant Store as SQLite
-  participant Disk as files/<tenant>/<file_id>/
+  participant Disk as Storage
+  participant VLLM as vLLM
 
   Client->>API: input_file {file_id}
   API->>Files: Resolve(file_id, tenant_id)
   Files->>Store: Get(file_id, tenant_id)
   Store-->>Files: record (status, manifest_path)
-  alt status=uploaded/processing
-    Files-->>API: 409 file_not_ready
+  loop status=uploaded/processing
+    Files->>Files: wait with backoff and jitter (100ms to 2.5s) or request/service cancellation
+    Files->>Store: Get(file_id, tenant_id)
+    Store-->>Files: current record
+  end
+  alt request deadline exceeded
+    API-->>Client: 504 request_timeout
+  else deleted/expired
+    Files-->>API: 404 file_not_found
+  else file service stopped
+    Files-->>API: 503 service_unavailable
   else status=failed
     Files-->>API: 422 file_processing_failed
   else status=processed
     Files->>Files: acquire read lease
     Files->>Disk: read manifest.json
     Files-->>API: record + manifest + release
-    API->>Disk: read derived/<text_path> / <image_path>
+    API->>Disk: read text and image artifacts
     API->>API: expand into content parts
     API->>Files: release lease
+    API->>API: inject documentInstruction
+    API->>VLLM: POST /v1/responses or /v1/chat/completions<br/>(expanded payload via forwardJSON)
+    alt upstream failed before response headers
+      API-->>Client: 504 request_timeout / 502 model_upstream_error
+    else upstream responded
+      VLLM-->>API: inference response (JSON or SSE)
+      API-->>Client: forward response
+    end
   end
 ```
 
 1. `files.Service.Resolve` retrieves the record from SQLite by `(file_id, tenant_id)`. If the record does not exist, it returns `404 file_not_found`.
-2. If the status is `uploaded` / `processing`, it returns `409 file_not_ready`; if `failed`, it returns `422 file_processing_failed`. Before referencing a file in inference, the client checks `status: "processed"` via `GET /v1/files/{file_id}`.
+2. If the status is `uploaded` / `processing`, it periodically retrieves the record with a doubling interval starting at 100ms up to 2s and waits until conversion completes. Each interval adds a 0-500ms jitter so that concurrent waiting requests do not synchronize their reads. If `failed`, it returns `422 file_processing_failed`; if the file does not exist, it returns `404 file_not_found`. On client disconnection, it stops waiting without canceling the background conversion; when the file service is stopping, it returns `503 service_unavailable`.
 3. If `processed`, it acquires a read lease and then reads `manifest.json` at `manifest_path`. The lease prevents races (TOCTOU) between directory deletion by Delete or the janitor and reading during inference.
-4. It reads the text and image artifacts under `derived/` referenced by each `ManifestPart` in the manifest and expands them into content parts. Once reading is complete, the lease is released.
+4. It reads the text and image artifacts under `derived/` referenced by each `ManifestPart` in the manifest and expands them into the content parts of the inference request. Once reading is complete, the lease is released.
+
+The inference and vLLM passthrough handlers set a single request context deadline from `REQUEST_TIMEOUT_SECONDS` (default 300 seconds; `0` disables the configured deadline). If the caller's deadline is shorter, it takes precedence.
+
+Deadline expiry during file conversion and during requests to the backend (vLLM) both return `504 request_timeout`.
+Once a response has started, `REQUEST_TIMEOUT_SECONDS` does not interrupt delivery for either streaming or non-streaming.
+
+The number of concurrent requests is configured as a non-negative integer with `MAX_CONCURRENT_REQUESTS` (default `0` (unlimited)); when the limit is reached, an OpenAI-format `429 too_many_requests` (message: `The gateway is busy.`) is returned.
+Slots are released when the final response headers are sent, and connections delivering responses are not counted for either streaming or non-streaming.
+
+Cancellation during file conversion processing is not supported.
+For inference requests, the context is checked before and after inline input preparation (fetch, converter resolution, validation, and conversion), before and after text/image conversion, and before forwarding the request to the backend. The file conversion wait is interrupted immediately on context cancellation.
+Expired conversion results are not used; the output of canceled text/image conversions is removed, and request-specific temporary artifacts are also deleted when the handler exits.
 
 `file_data` and `file_url` are not stored by the Files API, so they do not go through this resolution path. Instead, the source is saved to a request-specific temporary directory, and converter resolution, validation, and conversion are executed synchronously within the same request to generate the manifest. The temporary directory is deleted at the end of the request.
 
@@ -558,8 +591,6 @@ Responses' `input_file` and Chat Completions' `file` are expanded into content p
 When files are expanded, an instruction (`documentInstruction`) treating document content as untrusted source material is injected at the beginning of `instructions` for Responses, and as the first `system message` for Chat.
 
 Responses accepts `file_id`, `file_data`, and `file_url`; Chat accepts `file_id` and `file_data`. `file_url` is limited to HTTPS:443 without userinfo, public IPs, and a maximum of 4 redirects, re-validating each redirect. All addresses obtained via DNS are validated, and to prevent DNS rebinding, the connection dials the re-resolved and re-validated IP directly at connection time. Note that the OpenAI Chat Completions API does not support `file` input, but the Gateway accepts `file_id` and `file_data` in Chat Completions as an extension.
-
-Since `file_data` includes base64-encoded file content in the request body, sending multiple files at once inflates the body to several times `MAX_FILE_BYTES`. For this reason, `MAX_REQUEST_BODY_BYTES` (default 4x `MAX_FILE_BYTES`) is applied to the entire body of inference requests containing file references. This limit is not applied to passthrough requests without file references. `MAX_FILE_BYTES` functions as the per-file limit, and `MAX_REQUEST_BODY_BYTES` as the limit for the entire request containing file references. If the decoded size of a single file exceeds `MAX_FILE_BYTES`, it is rejected with `file_too_large` (400); if the entire request body containing file references exceeds `MAX_REQUEST_BODY_BYTES`, it is rejected with `request_too_large` (400).
 
 ### Responses API (`POST {VLLM_BASE_URL}/responses`)
 When files are expanded, `documentInstruction` is injected at the beginning of `instructions`.
@@ -633,13 +664,14 @@ Routes are registered by `NewHandler` in `http.ServeMux`. `POST /v1/responses` i
 
 #### Responses / Chat Completions
 
-- `Server.handleInference` (`inference.go`) is the common entry point for `POST /v1/responses` and `POST /v1/chat/completions`, and also accepts requests that do not contain file references (`file_id`, `file_data`, `file_url`). JSON parsing is performed only to determine the presence of file references; if parsing fails, the original body is forwarded as-is without an error. When there are no file references, payload expansion, `documentInstruction` injection, `model` validation, and `MAX_REQUEST_BODY_BYTES` validation are not applied, and the original content is forwarded to vLLM via `Server.forwardRequest`. In other words, file input is optional, and normal inference requests without files are also handled by the same endpoint.
+- `Server.handleInference` (`inference.go`) is the common entry point for `POST /v1/responses` and `POST /v1/chat/completions`, and also accepts requests that do not contain file references (`file_id`, `file_data`, `file_url`). `MAX_REQUEST_BODY_BYTES` is enforced while reading all incoming bodies. Within that limit, JSON parsing determines the presence of file references; if parsing fails, the original body is forwarded as-is without a gateway JSON validation error. When there are no file references, payload expansion, `documentInstruction` injection, and `model` validation are not applied, and the original content is forwarded to vLLM via `Server.forwardRequest`.
 - When file references are expanded, the payload re-serialized by `Server.forwardJSON` is forwarded to vLLM.
 
 ### passthrough
 
 - `Server.passthrough` (`proxy.go`) delegates `/v1/*` other than `POST /v1/responses` and `POST /v1/chat/completions`, excluding `/v1/files` and below, to `Server.forwardRequest`. Responses/Chat with other methods and unregistered endpoints are passed through.
 - Requests preserve the method, raw query, body, and end-to-end headers.
+- Upstream responses with `Content-Type: text/event-stream` are flushed after each write, including passthrough endpoints such as `/v1/completions`.
 - The client's `Authorization` is removed and replaced with Bearer authentication using `VLLM_API_KEY`.
 - `copyHeaders` excludes fixed hop-by-hop headers and headers listed in the `Connection` header in both the request/response directions. `Host` and `Content-Length` are also excluded from forwarding.
 - `Host` is replaced with the vLLM host, and `Content-Length` is set by the Go HTTP client from the forwarded body.
@@ -650,4 +682,4 @@ Structured text logs from `log/slog` are output to standard error. The public se
 
 ## Operational Boundary
 
-A single process, SQLite, and the local filesystem constitute the operational unit. Multiple conversion workers can run within a process, and races between artifact reads during inference input expansion/content retrieval and deletion are protected by in-process read leases. Queue/lease sharing across multiple replicas, rate limiting, malware scanning, and high availability are out of scope.
+A single process, SQLite, and the local filesystem constitute the operational unit. Multiple conversion workers can run within a process, and races between artifact reads during inference input expansion/content retrieval and deletion are protected by in-process read leases. Queue/lease sharing across multiple replicas, malware scanning, and high availability are out of scope.

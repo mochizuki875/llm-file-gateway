@@ -77,6 +77,32 @@ func TestRegistryMerge(t *testing.T) {
 	}
 }
 
+func TestRegistryMergeValidatesAndNormalizes(t *testing.T) {
+	factory := ConverterAdapter(func(ConverterConfig) DocumentConverter { return &testConverter{} })
+	registry := Registry{}
+	if err := registry.Merge(Registry{".CUSTOM": factory}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Converter(context.Background(), ".custom", DefaultConverterConfig(), nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, incoming := range map[string]Registry{
+		"conflict":            {".CUSTOM": factory, ".other": factory},
+		"invalid_extension":   {"invalid": factory, ".other": factory},
+		"nil_factory":         {".invalid": nil, ".other": factory},
+		"normalized_conflict": {".NEW": factory, ".new": factory},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := registry.Merge(incoming); err == nil {
+				t.Fatal("invalid merge accepted")
+			}
+			if len(registry) != 1 || registry[".custom"] == nil {
+				t.Fatalf("failed merge changed registry: %v", registry.Extensions())
+			}
+		})
+	}
+}
+
 func TestInTreeRegistryContainsSupportedFormats(t *testing.T) {
 	want := []string{".csv", ".doc", ".docx", ".htm", ".html", ".jpeg", ".jpg", ".markdown", ".md", ".pdf", ".png", ".ppt", ".pptx", ".txt", ".xls", ".xlsm", ".xlsx"}
 	registry := NewInTreeRegistry()

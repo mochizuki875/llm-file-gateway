@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,22 +359,55 @@ func (service *Service) Delete(ctx context.Context, id, tenantID string) (bool, 
 	return true, nil
 }
 
+// resolvePollInitial and resolvePollMax bound the wait between SQLite polls
+// while Resolve waits for a pending conversion. The interval doubles from the
+// initial value up to the maximum so that quick conversions are noticed
+// promptly while long waits keep the periodic read load low.
+const (
+	resolvePollInitial = 100 * time.Millisecond
+	resolvePollMax     = 2 * time.Second
+)
+
+// resolvePollJitter is the uniform random extra wait added to every poll
+// interval so that many concurrent waiting requests do not poll in lockstep
+// and align their reads on the single SQLite connection.
+const resolvePollJitter = 500 * time.Millisecond
+
 // Resolve returns the file record and its conversion manifest for inference
-// use. It rejects files that are still processing or that failed to convert.
+// use. It waits for pending conversions and rejects files that failed to convert.
 // The returned release function must be called when the caller is done
 // reading the file artifacts; until then Delete and the janitor wait before
 // removing the on-disk directory.
 func (service *Service) Resolve(ctx context.Context, id, tenantID, param string) (*store.File, converter.Manifest, func(), error) {
-	record, err := service.store.Get(ctx, id, tenantID)
-	if err != nil {
-		return nil, converter.Manifest{}, nil, err
-	}
-	if record == nil {
-		slog.Warn("file not found", "file_id", id, "param", param)
-		return nil, converter.Manifest{}, nil, apierror.New(404, "file_not_found", "File not found.", param)
-	}
-	if record.Status == "uploaded" || record.Status == "processing" {
-		return nil, converter.Manifest{}, nil, apierror.New(409, "file_not_ready", "The file is still being processed.", param)
+	var record *store.File
+	delay := resolvePollInitial
+	for {
+		var err error
+		record, err = service.store.Get(ctx, id, tenantID)
+		if err != nil {
+			return nil, converter.Manifest{}, nil, err
+		}
+		if record == nil {
+			slog.Warn("file not found", "file_id", id, "param", param)
+			return nil, converter.Manifest{}, nil, apierror.New(404, "file_not_found", "File not found.", param)
+		}
+		if record.Status != "uploaded" && record.Status != "processing" {
+			break
+		}
+		timer := time.NewTimer(delay + time.Duration(mathrand.Int64N(int64(resolvePollJitter))))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, converter.Manifest{}, nil, ctx.Err()
+		case <-service.lifecycle().Done():
+			timer.Stop()
+			return nil, converter.Manifest{}, nil, apierror.New(503, "service_unavailable", "The file service is stopping.", param)
+		case <-timer.C:
+		}
+		delay *= 2
+		if delay > resolvePollMax {
+			delay = resolvePollMax
+		}
 	}
 	if record.Status == "failed" || !record.ManifestPath.Valid {
 		return nil, converter.Manifest{}, nil, apierror.New(422, "file_processing_failed", "File processing failed.", param)
@@ -615,7 +649,8 @@ func (service *Service) handleErr(ctx context.Context, err error, job conversion
 		service.forget(job.id)
 		return
 	}
-	if service.retries(job.id) >= maxRetries {
+	retries := service.retries(job.id)
+	if retries >= maxRetries {
 		slog.Error("dropping conversion job out of the queue", "file_id", job.id, "error", err)
 		service.markFailed(job.id, err)
 		service.forget(job.id)
@@ -627,8 +662,8 @@ func (service *Service) handleErr(ctx context.Context, err error, job conversion
 		service.forget(job.id)
 		return
 	}
-	delay := backoffDelay(service.retries(job.id))
-	slog.Warn("error converting file, retrying", "file_id", job.id, "error", err, "retry", service.retries(job.id)+1, "delay", delay)
+	delay := backoffDelay(retries)
+	slog.Warn("error converting file, retrying", "file_id", job.id, "error", err, "retry", retries+1, "delay", delay)
 	service.enqueueAfter(ctx, job, delay)
 }
 

@@ -42,6 +42,7 @@ type Config struct {
 	TextExtractionEnabled       bool
 	Workers                     int
 	ConversionQueueCapacity     int
+	MaxConcurrentRequests       int
 	RequestTimeout              time.Duration
 	LogVerbosity                int
 }
@@ -150,6 +151,10 @@ func Load() (Config, error) {
 	if err != nil || conversionQueueCapacity < 0 {
 		return Config{}, fmt.Errorf("CONVERSION_QUEUE_CAPACITY must be a non-negative integer")
 	}
+	maxConcurrentRequests, err := envInt("MAX_CONCURRENT_REQUESTS", 0)
+	if err != nil || maxConcurrentRequests < 0 {
+		return Config{}, fmt.Errorf("MAX_CONCURRENT_REQUESTS must be a non-negative integer")
+	}
 	timeoutSeconds, err := envFloat("REQUEST_TIMEOUT_SECONDS", 300)
 	if err != nil || timeoutSeconds < 0 {
 		return Config{}, fmt.Errorf("REQUEST_TIMEOUT_SECONDS must be non-negative")
@@ -186,6 +191,7 @@ func Load() (Config, error) {
 		TextExtractionEnabled:       textExtractionEnabled,
 		Workers:                     workers,
 		ConversionQueueCapacity:     conversionQueueCapacity,
+		MaxConcurrentRequests:       maxConcurrentRequests,
 		RequestTimeout:              time.Duration(timeoutSeconds * float64(time.Second)),
 		LogVerbosity:                logVerbosity,
 	}

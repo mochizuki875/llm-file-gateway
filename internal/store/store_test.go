@@ -10,6 +10,36 @@ import (
 	"time"
 )
 
+func TestMigrateRemovesRedundantIndex(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	assertIndexes := func() {
+		t.Helper()
+		for name, want := range map[string]int{"files_tenant_created": 0, "files_tenant_created_id": 1} {
+			var count int
+			if err := store.database.QueryRow("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?", name).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != want {
+				t.Fatalf("index %s count = %d, want %d", name, count, want)
+			}
+		}
+	}
+	assertIndexes()
+	if _, err := store.database.Exec("CREATE INDEX files_tenant_created ON files (tenant_id, created_at)"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.Migrate(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		assertIndexes()
+	}
+}
+
 func TestStoreScopesFilesByTenantAndLifetime(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {

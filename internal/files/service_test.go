@@ -680,8 +680,8 @@ func TestResolveStatuses(t *testing.T) {
 		wantStatus int
 		wantCode   string
 	}{
-		{name: "uploaded", status: "uploaded", wantStatus: 409, wantCode: "file_not_ready"},
-		{name: "processing", status: "processing", wantStatus: 409, wantCode: "file_not_ready"},
+		{name: "uploaded", status: "uploaded"},
+		{name: "processing", status: "processing"},
 		{name: "failed", status: "failed", wantStatus: 422, wantCode: "file_processing_failed"},
 		{name: "processed_without_manifest", status: "processed", wantStatus: 422, wantCode: "file_processing_failed"},
 	} {
@@ -692,15 +692,123 @@ func TestResolveStatuses(t *testing.T) {
 			if err := dataStore.Add(context.Background(), record); err != nil {
 				t.Fatal(err)
 			}
-			_, _, _, err := service.Resolve(context.Background(), record.ID, "tenant-a", "input[0].file_id")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			_, _, _, err := service.Resolve(ctx, record.ID, "tenant-a", "input[0].file_id")
 			var gatewayError *apierror.Error
-			if !errors.As(err, &gatewayError) || gatewayError.Status != test.wantStatus || gatewayError.Code != test.wantCode {
+			if test.wantStatus == 0 {
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("error = %v, want deadline exceeded", err)
+				}
+			} else if !errors.As(err, &gatewayError) || gatewayError.Status != test.wantStatus || gatewayError.Code != test.wantCode {
 				t.Fatalf("error = %v, want %d %s", err, test.wantStatus, test.wantCode)
 			}
 			if _, err := dataStore.Delete(context.Background(), record.ID, "tenant-a"); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestResolveWaitsForTerminalState(t *testing.T) {
+	for _, initialStatus := range []string{"uploaded", "processing"} {
+		for _, outcome := range []string{"processed", "failed", "deleted", "expired", "canceled", "stopped"} {
+			t.Run(initialStatus+"/"+outcome, func(t *testing.T) {
+				dataDir := t.TempDir()
+				dataStore, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = dataStore.Close() })
+				service := New(testSettings(dataDir), dataStore, testDispatcher(t))
+				t.Cleanup(service.Stop)
+				now := time.Now().Unix()
+				record := store.File{
+					ID: "file_wait", TenantID: "tenant-a", Filename: "notes.txt", MediaType: "text/plain",
+					Purpose: "user_data", Bytes: 5, SHA256: "digest", Status: initialStatus,
+					SourcePath: "files/tenant-a/file_wait/source.txt", CreatedAt: now, ExpiresAt: now + 3600,
+				}
+				if outcome == "expired" {
+					// Expire within the first backoff steps so the next poll
+					// observes the disappearance well inside the wait window.
+					record.ExpiresAt = now + 1
+				}
+				if err := dataStore.Add(context.Background(), record); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				result := make(chan error, 1)
+				go func() {
+					resolved, manifest, release, err := service.Resolve(ctx, record.ID, record.TenantID, "input[0].file_id")
+					if release != nil {
+						release()
+					}
+					if err == nil && (resolved.Status != "processed" || manifest.SchemaVersion != converter.ManifestSchemaVersion) {
+						err = fmt.Errorf("unexpected resolved file or manifest: %#v, %#v", resolved, manifest)
+					}
+					result <- err
+				}()
+				select {
+				case err := <-result:
+					t.Fatalf("Resolve returned before a terminal state: %v", err)
+				case <-time.After(20 * time.Millisecond):
+				}
+				wantStatus := 0
+				wantCode := ""
+				switch outcome {
+				case "processed":
+					manifestPath := "files/tenant-a/file_wait/manifest.json"
+					if err := os.MkdirAll(filepath.Dir(filepath.Join(dataDir, manifestPath)), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					encoded, err := json.Marshal(converter.Manifest{SchemaVersion: converter.ManifestSchemaVersion})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dataDir, manifestPath), encoded, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := dataStore.UpdateStatus(context.Background(), record.ID, "processed", manifestPath, ""); err != nil {
+						t.Fatal(err)
+					}
+				case "failed":
+					if _, err := dataStore.UpdateStatus(context.Background(), record.ID, "failed", "", "conversion failed"); err != nil {
+						t.Fatal(err)
+					}
+					wantStatus, wantCode = 422, "file_processing_failed"
+				case "deleted":
+					if _, err := service.Delete(context.Background(), record.ID, record.TenantID); err != nil {
+						t.Fatal(err)
+					}
+					wantStatus, wantCode = 404, "file_not_found"
+				case "expired":
+					wantStatus, wantCode = 404, "file_not_found"
+				case "canceled":
+					cancel()
+				case "stopped":
+					service.Stop()
+					wantStatus, wantCode = 503, "service_unavailable"
+				}
+				select {
+				case err := <-result:
+					var gatewayError *apierror.Error
+					if outcome == "canceled" {
+						if !errors.Is(err, context.Canceled) {
+							t.Fatalf("error = %v, want context canceled", err)
+						}
+					} else if wantStatus == 0 {
+						if err != nil {
+							t.Fatal(err)
+						}
+					} else if !errors.As(err, &gatewayError) || gatewayError.Status != wantStatus || gatewayError.Code != wantCode {
+						t.Fatalf("error = %v, want %d %s", err, wantStatus, wantCode)
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("Resolve did not finish")
+				}
+			})
+		}
 	}
 }
 

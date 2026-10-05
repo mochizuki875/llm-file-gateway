@@ -106,10 +106,16 @@ func (registry Registry) Unregister(extension string) error {
 // Merge adds all converter factories from another registry, failing on
 // conflicts.
 func (registry Registry) Merge(in Registry) error {
+	merged := make(Registry, len(registry)+len(in))
+	for extension, factory := range registry {
+		merged[extension] = factory
+	}
 	for extension, factory := range in {
-		if _, exists := registry[extension]; exists {
-			return fmt.Errorf("converter already registered for %s", extension)
+		if err := merged.Register(extension, factory); err != nil {
+			return err
 		}
+	}
+	for extension, factory := range merged {
 		registry[extension] = factory
 	}
 	return nil

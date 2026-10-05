@@ -5,7 +5,7 @@ English | [日本語](docs/README-ja.md)
 ![](images/logo.png)
 
 This is a gateway that provides [OpenAI Files API](https://developers.openai.com/api/reference/resources/files) compatibility in front of the [vLLM API](https://docs.vllm.ai/en/stable/serving/online_serving/).
-When files such as PDF, Office documents, text, and images are uploaded via the OpenAI Files API-compatible API, a `file_id` is issued at upload time, and image conversion and text extraction are performed asynchronously and the results are stored as artifacts.
+When files such as PDF, Office documents, text, and images are uploaded via the OpenAI Files API-compatible API, a `file_id` is issued at upload time, and image conversion and text extraction are performed asynchronously and stored as artifacts.
 By attaching the `file_id` to a Responses API or Chat Completions API request, artifacts based on files uploaded via the Files API can be forwarded to the backend as images (base64) and extracted text.
 
 File image conversion uses [document-image-renderer](https://github.com/mochizuki875/document-image-renderer).
@@ -22,7 +22,6 @@ File image conversion uses [document-image-renderer](https://github.com/mochizuk
 - The Gateway has a stateful all-in-one configuration and does not support scaling across multiple instances
 - Does not guarantee an exact match with the OpenAI Files API in terms of file conversion, token usage, or response quality
 - The Responses API's `input_file.detail` is accepted but is not reflected in `low`/`high` conversion quality (files are always processed with the Gateway's default conversion settings and forwarded to the model as images with `detail: "auto"`)
-- Since LLM File Gateway aims for compatibility with the OpenAI Files API, it does not include features commonly expected of general gateways such as rate limiting and request size limits
 
 ## Supported APIs
 
@@ -39,7 +38,8 @@ File image conversion uses [document-image-renderer](https://github.com/mochizuk
 | Other vLLM APIs | `/v1/*` (Passed through) |
 
 - `GET /health` only indicates that the process is running; it does not check connectivity to SQLite, LibreOffice, or vLLM.
-- Image conversion and text extraction when uploading files via the Files API are performed asynchronously. Before referencing a file in inference, check its processing status (`status: "processed"`) via `GET /v1/files/{file_id}`. Returns `409 file_not_ready` while conversion is in progress and `422 file_processing_failed` after a failure.
+- Image conversion and text extraction when uploading files via the Files API are performed asynchronously. Inference requests that reference a `file_id` waiting for or undergoing conversion wait internally until the conversion completes and are then forwarded to vLLM.
+- The `status` field of `GET /v1/files/{file_id}` shows the file state. The `status` field is one of `uploaded` (stored; waiting for or undergoing conversion), `processed` (conversion complete), or `error` (conversion failed). Conversion failures return `422 file_processing_failed`, and deletion or expiration while waiting returns `404 file_not_found`.
 - Unsupported methods on paths owned by the Files API return `405` without being forwarded to vLLM.
 
 ## Supported Formats
@@ -97,7 +97,7 @@ The Gateway reads configuration values from the process environment variables.
 | `GATEWAY_DATA_DIR` | No | `gateway-data` | Directory where SQLite and files are stored |
 | `FILE_TTL_SECONDS` | No | `300` | Default file retention period (sec) and the upper limit that can be specified in `expires_after.seconds` (`0` for unlimited) |
 | `MAX_FILE_BYTES` | No | `52428800` (50 MiB) | Maximum size of a single file (bytes) (`0` for unlimited) |
-| `MAX_REQUEST_BODY_BYTES` | No | 4x `MAX_FILE_BYTES` | Maximum total body size (bytes) of inference requests to `/v1/responses` and `/v1/chat/completions` that include file references. Includes JSON and base64-encoded file_data (not applied to requests without file references, `0` for unlimited) |
+| `MAX_REQUEST_BODY_BYTES` | No | 4x `MAX_FILE_BYTES` | Maximum received body size (bytes) of inference requests (`0` for unlimited) |
 | `MAX_DOCUMENT_PAGES` | No | `50` | Maximum number of PDF/Office pages accepted by the Gateway (`0` for unlimited) |
 | `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | Maximum number of characters extracted from a single file (`0` for unlimited) |
 | `MAX_DOCUMENT_PDF_BYTES` | No | `134217728` (128 MiB) | Maximum size of PDFs processed by the renderer (bytes) (`0` for unlimited) |
@@ -108,13 +108,14 @@ The Gateway reads configuration values from the process environment variables.
 | `MAX_DOCUMENT_OOXML_MEMBERS` | No | `10000` | Maximum number of members in an OOXML archive (`0` for unlimited) |
 | `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | No | `268435456` (256 MiB) | Maximum decompressed size of a single member in an OOXML archive (bytes) (`0` for unlimited) |
 | `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | No | `1073741824` (1 GiB) | Maximum total decompressed size of an OOXML archive (bytes) (`0` for unlimited) |
+| `MAX_CONCURRENT_REQUESTS` | No | `0` | Maximum number of concurrent requests (`0` for unlimited). The Health API is excluded. |
 | `DOCUMENT_DPI` | No | `300` | Resolution (DPI) when converting PDF/Office to images. Integer from 1 to 1200 |
 | `DOCUMENT_RENDER_TIMEOUT_SECONDS` | No | `300` | Timeout (sec) for PDF/Office image conversion (`0` for unlimited) |
 | `DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS` | No | `300` | Timeout (sec) for LibreOffice used in Office conversion (`0` for unlimited) |
 | `DOCUMENT_TEXT_EXTRACTION_ENABLED` | No | `true` | Whether to extract text from PDF and Office files |
 | `CONVERSION_WORKERS` | No | `2` | Number of workers that convert files concurrently. Can be changed with a positive integer |
 | `CONVERSION_QUEUE_CAPACITY` | No | `0` | Number of conversion jobs waiting for a worker to start processing that can be held in the queue (`0` for unlimited) |
-| `REQUEST_TIMEOUT_SECONDS` | No | `300` | Timeout for vLLM communication. For streaming, applies to the entire stream (`0` for unlimited) |
+| `REQUEST_TIMEOUT_SECONDS` | No | `300` | Deadline shared across file waiting, preparation, and vLLM communication until response headers start being returned. Also applied to passthrough requests to vLLM (`0` for unlimited) |
 | `LOGLEVEL` | No | `0` | Log verbosity (`0`: normal, `1`: DEBUG, `2`: frequent detailed logs) |
 
 - Setting `GATEWAY_AUTH_REQUIRED=true` enables authentication at the Gateway, making `GATEWAY_API_KEY` required.
@@ -204,7 +205,7 @@ python openai_file_summary_stream.py
 
 ### curl
 
-Use the curl command to upload a file, wait for conversion to complete, summarize via the Responses API, and delete the file, in that order.
+Use the curl command to upload a file, send an inference request via the Responses API, and delete the file, in that order.
 
 ```bash
 cd example
@@ -217,16 +218,7 @@ FILE_ID=$(curl --fail --silent "$OPENAI_BASE_URL/files" \
   -F "file=@$DOCUMENT" | jq -r .id)
 echo "Uploaded: $FILE_ID"
 
-# Wait until the document is processed by the Gateway
-while true; do
-  FILE_STATUS=$(curl --fail --silent "$OPENAI_BASE_URL/files/$FILE_ID" \
-    -H "Authorization: Bearer $OPENAI_API_KEY" | jq -r .status)
-  [[ "$FILE_STATUS" == "processed" ]] && break
-  [[ "$FILE_STATUS" == "error" ]] && { echo "Conversion failed" >&2; exit 1; }
-  sleep 1
-done
-
-# Summarize the document using the Responses API
+# Summarize the document; the Gateway waits for conversion automatically
 curl --fail --silent "$OPENAI_BASE_URL/responses" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H 'Content-Type: application/json' \

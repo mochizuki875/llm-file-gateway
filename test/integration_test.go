@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	_ "image/jpeg"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mochizuki875/document-image-renderer/pkg/renderer"
 	"github.com/mochizuki875/llm-file-gateway/internal/config"
 	"github.com/mochizuki875/llm-file-gateway/internal/converter"
 	"github.com/mochizuki875/llm-file-gateway/internal/files"
@@ -188,6 +191,38 @@ func TestGatewayEndToEndTextFile(t *testing.T) {
 
 // TestGatewayEndToEndPDF uploads a real PDF, waits for conversion, and
 // verifies that page images reach the upstream vLLM.
+func TestRenderedJPEGMediaType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires PDFium")
+	}
+	configuration := converter.DefaultConverterConfig()
+	configuration.ImageFormat = renderer.ImageFormatJPEG
+	documentConverter, err := converter.NewInTreeRegistry().Converter(context.Background(), ".pdf", configuration, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(t.TempDir(), "derived")
+	result, err := documentConverter.Convert(context.Background(), filepath.Join("..", "example", "samplefile.pdf"), outputDir, converter.Options{DisableTextExtraction: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Artifacts) == 0 {
+		t.Fatal("no rendered images")
+	}
+	for _, part := range result.Artifacts {
+		if part.MediaType == nil || *part.MediaType != "image/jpeg" || part.ImagePath == nil {
+			t.Fatalf("invalid JPEG artifact: %#v", part)
+		}
+		content, err := os.ReadFile(filepath.Join(outputDir, *part.ImagePath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, format, err := image.DecodeConfig(bytes.NewReader(content)); err != nil || format != "jpeg" {
+			t.Fatalf("image format = %q, error = %v", format, err)
+		}
+	}
+}
+
 func TestGatewayEndToEndPDF(t *testing.T) {
 	if testing.Short() {
 		t.Skip("PDFium rendering is an integration test")

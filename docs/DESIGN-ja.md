@@ -27,13 +27,13 @@ flowchart LR
 ```
 1. クライアントがFiles APIへファイルをアップロードする
 2. Gatewayがファイルを保存し、`file_id`と`status: "uploaded"`を返す
-3. Workerがファイル形式に応じたConverterでアーティファクト（変換画像および抽出テキスト）を生成する
-4. アーティファクトの生成が完了したら`status: "processed"`に更新する
+3. Workerがファイル形式に応じたConverterでartifact（変換画像および抽出テキスト）を生成する
+4. artifactの生成が完了したら`status: "processed"`に更新する
 5. クライアントが`file_id`を付与してResponsesまたはChat Completions APIを実行する
 6. `file_id`に紐づくファイルの抽出テキストおよび変換画像を、それぞれプロンプトと`image_url`へ展開する
 7. リクエストをバックエンドのvLLMへ転送する
 
-GatewayはFiles APIに送信された変換前のファイルと`file_id`を直接vLLMへ送信しません。`file_data`と`file_url`でファイル情報が送信された場合は同期処理でファイルの保存、変換、リクエスト転送、削除を行います。Files APIで保存したファイルはクライアントがFiles APIで指定したファイル保持期間(`expires_after.seconds`)経過後に削除されます。(指定されなかった場合は`FILE_TTL_SECONDS`がデフォルト値として使用されます。)
+GatewayはFiles APIに送信された変換前のファイルと`file_id`を直接vLLMへ送信しません。`file_data`と`file_url`でファイル情報が送信された場合は同期処理でファイルの保存、変換、リクエスト転送、削除を行います。Files APIで保存したファイルはクライアントがFiles APIで指定したファイル保持期間(`expires_after.seconds`)経過後に削除されます。（指定されなかった場合は`FILE_TTL_SECONDS`がデフォルト値として使用されます。）
 
 ## Packages
 
@@ -43,7 +43,7 @@ GatewayはFiles APIに送信された変換前のファイルと`file_id`を直�
 | `internal/config` | 環境変数の検証と読み込み |
 | `internal/store` | SQLite schemaとCRUDの定義 |
 | `internal/files` | ファイルの保存、Conversion Queue、Worker、Janitor |
-| `internal/converter` | Converter Registry、Dispatcher、共通変換処理、ファイル形式毎のconverterとextractor |
+| `internal/converter` | Converter Registry、Dispatcher、共通変換処理、ファイル形式ごとのconverterとextractor |
 | `internal/server` | Files/Responses/Chat API、ファイル展開、公開URL取得、vLLM proxy |
 | `internal/apierror` | OpenAI形式のerror |
 | `internal/logging` | verbosityに基づく構造化logging |
@@ -61,7 +61,7 @@ GatewayはFiles APIに送信された変換前のファイルと`file_id`を直�
 
 
 ## Converter Architecture
-全てのConverterは`DocumentConverter`を実装し、Plugin形式で任意の形式に対応したConverterを追加できる。
+すべてのConverterは`DocumentConverter`を実装し、Plugin形式で任意の形式に対応したConverterを追加できる。
 ```go
 type DocumentConverter interface {
   Extension() string
@@ -75,7 +75,7 @@ type DocumentConverter interface {
 - 各Converterは拡張子ごとの検証(`Validate`)と変換(`Convert`)を所有し、ファイル形式に応じた検証、変換を行う。
 - Converterは、PDF、Office、画像など専用処理が必要な形式のConverterと、NUL byteなしのUTF-8形式を扱う共通`textConverter`で構成する。
 - PDFとOffice形式ファイルのテキスト抽出および画像変換は[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)へ委譲する。
-- テキストファイルなどUTF-8形式でNUL byteを含まないファイルは、ファイル形式に対応するExtractorで抽出処理を行なった後、共通の`textConverter`で処理される。
+- テキストファイルなどUTF-8形式でNUL byteを含まないファイルは、ファイル形式に対応するExtractorで抽出処理を行った後、共通の`textConverter`で処理される。
 - `textConverter`は`extractor.Extractor`関数型(`func(string) (string, error)`)を保持し、`Validate`と`Convert`の両方で同じextractorを呼び出す。
 
 ```go
@@ -94,9 +94,9 @@ type Extractor func(string) (string, error)
 #### Converterのライフサイクル
 
 - `Registry.Converter`は拡張子ごとの`ConverterFactory`を解決のたびに呼び出し、新しい`DocumentConverter`インスタンスを生成する。in-treeのconverterはすべてステートレスである（`ConverterConfig`のみを保持し、変換ごとに独立して動作する）。
-- ステートフルなリソース（接続プール、キャッシュ、一時ファイル等）を保持するout-of-tree converterは、factory内でリソースを生成し、`Convert`終了時に自ら解放する必要がある。factoryが返すconverterのライフサイクル管理はconverterの責務であり、Registry/Dispatcherはconverterを再利用しない。
+- ステートフルなリソース（接続プール、キャッシュ、一時ファイルなど）を保持するout-of-tree converterは、factory内でリソースを生成し、`Convert`終了時に自ら解放する必要がある。factoryが返すconverterのライフサイクル管理はconverterの責務であり、Registry/Dispatcherはconverterを再利用しない。
 - `Registry.Converter`は未登録拡張子に対して`ErrConverterNotFound`を返す。`Dispatcher.ResolveConverter`は`errors.Is`でこのエラーを判定し、未登録拡張子を`text/plain`のfallbackへ委譲する。
-- factoryが返すエラー（初期化失敗等）は呼び出し元へ伝播する。
+- factoryが返すエラー（初期化失敗など）は呼び出し元へ伝播する。
 
 ```mermaid
 flowchart LR
@@ -266,7 +266,7 @@ func NewInTreeRegistry() Registry {
 - `internal/converter/registry_test.go`の`TestInTreeRegistryContainsSupportedFormats`に拡張子を追加する。
 - `internal/converter/text_common_test.go`の`TestTextConverters`にテキスト系のケースを追加する。
 - 専用Converterは`dispatcher_test.go`の`TestDispatcherDelegatesToSelectedPlugin`と同様に、`convertForTest`で`Validate`→`Convert`を通してartifactを検証する。
-- 外部ツール（LibreOffice等）に依存するテストは`testing.Short()`でskipする。
+- 外部ツール（LibreOfficeなど）に依存するテストは`testing.Short()`でskipする。
 
 #### 注意点
 
@@ -311,15 +311,18 @@ func NewInTreeRegistry() Registry {
 - PDF/Officeは描画画像ごとに1 artifactを作り、抽出が有効なら対応するtext pathも同じartifactへ設定する。
 - text系はExtractor出力全体を1つのtext artifactとして保存する。CSVのrecordやHTMLの要素を個別partには分割しない。
 - JPEG/PNGは元画像のcopyと空のtext artifactを1 partとして保存する。
-- manifestとartifactは入力ごとの専有directoryへ出力し、変換失敗時は共通処理が途中成果物を削除する。
+- manifestとartifactは入力ごとの専用directoryへ出力し、変換失敗時は共通処理が途中のartifactを削除する。
 - 各partの`page_number`、`image_path`、`width`、`height`、`media_type`、`sha256`は画像を持たないtext artifactでは`null`になる。
 - `text_path`はtext抽出を無効にしたrendered artifactでは空文字列になる。
+- `Result.Warnings`と`Manifest.Warnings`は、converterが変換を中断しない警告を返すための拡張ポイントであり、組み込みconverterは現在警告を返さない。`documents`を持たないmanifestは推論展開時に拒否する。
 
 ## File Lifecycle
 
 ### 状態遷移
 
 Files APIは保存後に`uploaded`を返す。workerは変換開始時に`processing`へ、manifestの永続化後に`processed`へ更新する。変換に失敗した場合は`failed`へ更新する。削除時の`deleted`はAPI上の概念状態であり、DBでは`deleted_at`を設定して不可視化した後、変換とread leaseの終了を待ってrecordを物理削除する。
+
+Files APIが返す`status`フィールドはこれらの内部状態を正規化した値であり、`uploaded`と`processing`はいずれも`uploaded`として、`processed`は`processed`として返す。`failed`は`status_details`にエラーメッセージを含めた`error`として返す。
 
 ```mermaid
 stateDiagram-v2
@@ -335,14 +338,14 @@ stateDiagram-v2
 
 ### 登録と非同期変換
 
-- `internal/workqueue`のqueueはprocess内のFIFOであり、`CONVERSION_QUEUE_CAPACITY`（既定0）の変換待ちjobを保持する。`0`は無制限、正の整数は上限を表す。実行中jobはこの件数に含まれない。`CONVERSION_WORKERS`（既定2）個のworker goroutineがqueueを共有する。
-- 新規uploadでは最初に解決した`DocumentConverter`を`file_id`とともにqueueへ追加する。workerはconverterを再解決しない。
+- `internal/workqueue`のqueueはprocess内のFIFOであり、`CONVERSION_QUEUE_CAPACITY`（デフォルト0）の変換待ちjobを保持する。`0`は無制限、正の整数は上限を表す。実行中jobはこの件数に含まれない。`CONVERSION_WORKERS`（デフォルト2）個のworker goroutineがqueueを共有する。
+- 新規アップロードでは最初に解決した`DocumentConverter`を`file_id`とともにqueueへ追加する。workerはconverterを再解決しない。
 - DBへのrecord保存後はHTTP request contextではなくservice lifecycle contextでenqueueするため、client切断後も変換は継続する。
 - retry可能な変換errorは1、2、4秒のexponential backoffで最大3回再試行する。ページ数・文字数・入力検証など決定的なerrorは再試行せず`failed`へ遷移する。
 
-### アーティファクトとfile_idの紐付け
+### artifactとfile_idの紐付け
 
-1つのfileは`GATEWAY_DATA_DIR`配下の専有directoryとSQLiteの1 recordで管理する。
+1つのfileは`GATEWAY_DATA_DIR`配下の専用directoryとSQLiteの1 recordで管理する。
 
 ```text
 GATEWAY_DATA_DIR/
@@ -352,14 +355,14 @@ GATEWAY_DATA_DIR/
         └── <file_id>/           # 1 file = 1 dedicated directory
             ├── source<ext>      # アップロードされた元ファイル (0600)
             ├── manifest.json    # 変換結果のmanifest (0600)
-            └── derived/         # 変換成果物 (directory 0700 / file 0600)
+            └── derived/         # 変換artifact (directory 0700 / file 0600)
                 ├── source-page-0001.png
                 ├── source-page-0001.txt
                 ├── source-page-0002.png
                 └── source-page-0002.txt
 ```
 
-- `file_id`は`file_` + 32桁の16進数（16 byteの乱数）をupload時に生成する。
+- `file_id`は`file_` + 32桁の16進数（16 byteの乱数）をアップロード時に生成する。
 - SQLiteの`files` tableは`id`（file_id）と`tenant_id`を組としてrecordを管理し、`source_path`と`manifest_path`に`GATEWAY_DATA_DIR`からの相対pathを保存する。変換画像と抽出テキストの実体は`derived/`配下にあり、`manifest.json`の各`ManifestPart`が`text_path` / `image_path`として`derived/`内のfile名を参照する。
 - file_idの検索は常に`(file_id, tenant_id)`の組で行う。認証有効時はAPI keyのSHA-256先頭32桁がtenant IDとなるため、他tenantのfile_idを指定してもrecordを参照できない。認証無効時は全fileがshared tenantへ統合される。
 
@@ -371,7 +374,7 @@ GATEWAY_DATA_DIR/
 
 ### 保持期限と削除
 
-- 保持期限は作成時刻から`expires_after.seconds`後とし、未指定時は`FILE_TTL_SECONDS`（既定300秒）を使用する。
+- 保持期限は作成時刻から`expires_after.seconds`後とし、未指定時は`FILE_TTL_SECONDS`（デフォルト300秒）を使用する。
 - `FILE_TTL_SECONDS=0`または`expires_at=0`は無期限を表す。
 - janitor goroutineは起動時と30秒ごとに期限切れfileを確認し、期限切れrecordと関連directoryを物理削除する。
 - API削除とjanitorは最初に`deleted_at`を設定し、対象fileの変換contextをcancelして終了を待つ。推論やcontent取得が保持するread leaseもすべて解放された後にdirectoryとDB recordを削除する。
@@ -446,11 +449,11 @@ flowchart TD
   Permissions --> Result[Result literal<br/>変換結果を返す]
 ```
 - Converterの解決と入力検証は変換開始前に行う。
-- Files APIの通常uploadではDispatcherがConverterを解決して`Validate`を実行し、そのConverterをjobとともにqueueへ保存する。
+- Files APIの通常アップロードではDispatcherがConverterを解決して`Validate`を実行し、そのConverterをjobとともにqueueへ保存する。
 - workerは選択や検証を繰り返さず`Convert`を実行する。
 - 起動時に復旧したjobはConverterを保持していないため、workerが保存済みsourceの拡張子から再解決する。inline入力では同じrequest内で解決、検証、変換を順に実行する。
-- 成果物は`manifest.json`とpart単位のtext/imageで構成する。
-- Files APIの成果物は`GATEWAY_DATA_DIR/files/<tenant>/<file_id>`、inline入力の成果物は`work`以下のrequest専用directoryへ保存し、request終了時に削除する。
+- artifactは`manifest.json`とpart単位のtext/imageで構成する。
+- Files APIのartifactは`GATEWAY_DATA_DIR/files/<tenant>/<file_id>`、inline入力のartifactは`work`以下のrequest専用directoryへ保存し、request終了時に削除する。
 
 ### PDF / Office
 
@@ -473,9 +476,9 @@ PDFはPDFium/WASMで直接処理し、Officeは必要に応じてLibreOfficeで�
 | XLS/XLSX/XLSM | worksheet | worksheetごと |
 | DOC/DOCX | 描画されたpage | 本文全体をpart 1へ保存し、part 2以降は空のtext artifact |
 
-`DOCUMENT_TEXT_EXTRACTION_ENABLED`は既定で`true`とする。`false`の場合は抽出処理を呼ばず、画像だけを持つpartを生成する。
+`DOCUMENT_TEXT_EXTRACTION_ENABLED`はデフォルトで`true`とする。`false`の場合は抽出処理を呼ばず、画像だけを持つpartを生成する。
 
-LibreOffice timeoutは`DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS`（既定300秒、`0`で無制限）で設定し、描画とテキスト抽出の両方へ適用する。
+LibreOffice timeoutは`DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS`（デフォルト300秒、`0`で無制限）で設定し、描画とテキスト抽出の両方へ適用する。
 
 ### Text / Image
 
@@ -485,34 +488,34 @@ LibreOffice timeoutは`DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS`（既定300秒、`0
 
 ### 設定と制限
 
-| 設定 | 意味 | 既定値・許容値 | 適用方法 |
+| 設定 | 意味 | デフォルト値・許容値 | 適用方法 |
 | --- | --- | --- | --- |
-| `DOCUMENT_DPI` | PDF/Officeを画像化する解像度 | 既定300、1〜1200 | `RenderOptions.DPI`としてrendererへ渡す |
-| `DOCUMENT_RENDER_TIMEOUT_SECONDS` | PDF/Officeの画像描画処理全体の制限時間 | 既定300秒、`0`で無制限 | `RenderOptions.RenderTimeout`としてrendererへ渡す |
-| `DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS` | Office文書をLibreOfficeで変換する処理の制限時間 | 既定300秒、`0`で無制限 | 描画時の`RenderOptions.LibreOfficeTimeout`と抽出時の`ExtractOptions.LibreOfficeTimeout`へ渡す |
-| `MAX_DOCUMENT_PAGES` | 1文書から画像化・推論展開できる最大part数 | 既定50、`0`で無制限 | PDF/Officeでは`RenderOptions.MaxPages`としてrendererへ渡し、推論展開時にも画像part数を検証する |
-| `MAX_DOCUMENT_TEXT_CHARS` | 1文書から抽出できるテキストの最大文字数 | 既定500000、`0`で無制限 | PDF/Officeでは`ExtractOptions.MaxCharacters`としてrendererへ渡し、テキスト系では`validateTextLimit`で検証する |
-| `MAX_DOCUMENT_PDF_BYTES` | rendererが処理するPDFの最大サイズ | 既定128 MiB、`0`で無制限 | 描画・抽出両方の`MaxPDFBytes`へ渡す |
-| `MAX_DOCUMENT_PAGE_WIDTH` | 描画する1 pageの最大幅 | 既定20000 px、`0`で無制限 | `RenderOptions.MaxPageWidth`としてrendererへ渡す |
-| `MAX_DOCUMENT_PAGE_HEIGHT` | 描画する1 pageの最大高さ | 既定20000 px、`0`で無制限 | `RenderOptions.MaxPageHeight`としてrendererへ渡す |
-| `MAX_DOCUMENT_PAGE_PIXELS` | 描画する1 pageの最大画素数 | 既定200000000、`0`で無制限 | `RenderOptions.MaxPagePixels`としてrendererへ渡す |
-| `MAX_DOCUMENT_PIXELS` | 1 document全体の最大画素数 | 既定1000000000、`0`で無制限 | `RenderOptions.MaxDocumentPixels`としてrendererへ渡す |
-| `MAX_DOCUMENT_OOXML_MEMBERS` | OOXML archiveの最大member数 | 既定10000、`0`で無制限 | 描画・抽出両方の`MaxOOXMLMembers`へ渡す |
-| `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | OOXML archive内の単一memberの最大展開サイズ | 既定256 MiB、`0`で無制限 | 描画・抽出両方の`MaxOOXMLMemberBytes`へ渡す |
-| `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | OOXML archive全体の最大展開サイズ | 既定1 GiB、`0`で無制限 | 描画・抽出両方の`MaxOOXMLTotalBytes`へ渡す |
+| `DOCUMENT_DPI` | PDF/Officeを画像化する解像度 | デフォルト300、1〜1200 | `RenderOptions.DPI`としてrendererへ渡す |
+| `DOCUMENT_RENDER_TIMEOUT_SECONDS` | PDF/Officeの画像描画処理全体の制限時間 | デフォルト300秒、`0`で無制限 | `RenderOptions.RenderTimeout`としてrendererへ渡す |
+| `DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS` | Office文書をLibreOfficeで変換する処理の制限時間 | デフォルト300秒、`0`で無制限 | 描画時の`RenderOptions.LibreOfficeTimeout`と抽出時の`ExtractOptions.LibreOfficeTimeout`へ渡す |
+| `MAX_DOCUMENT_PAGES` | 1文書から画像化・推論展開できる最大part数 | デフォルト50、`0`で無制限 | PDF/Officeでは`RenderOptions.MaxPages`としてrendererへ渡し、推論展開時にも画像part数を検証する |
+| `MAX_DOCUMENT_TEXT_CHARS` | 1文書から抽出できるテキストの最大文字数 | デフォルト500000、`0`で無制限 | PDF/Officeでは`ExtractOptions.MaxCharacters`としてrendererへ渡し、テキスト系では`validateTextLimit`で検証する |
+| `MAX_DOCUMENT_PDF_BYTES` | rendererが処理するPDFの最大サイズ | デフォルト128 MiB、`0`で無制限 | 描画・抽出両方の`MaxPDFBytes`へ渡す |
+| `MAX_DOCUMENT_PAGE_WIDTH` | 描画する1 pageの最大幅 | デフォルト20000 px、`0`で無制限 | `RenderOptions.MaxPageWidth`としてrendererへ渡す |
+| `MAX_DOCUMENT_PAGE_HEIGHT` | 描画する1 pageの最大高さ | デフォルト20000 px、`0`で無制限 | `RenderOptions.MaxPageHeight`としてrendererへ渡す |
+| `MAX_DOCUMENT_PAGE_PIXELS` | 描画する1 pageの最大画素数 | デフォルト200000000、`0`で無制限 | `RenderOptions.MaxPagePixels`としてrendererへ渡す |
+| `MAX_DOCUMENT_PIXELS` | 1 document全体の最大画素数 | デフォルト1000000000、`0`で無制限 | `RenderOptions.MaxDocumentPixels`としてrendererへ渡す |
+| `MAX_DOCUMENT_OOXML_MEMBERS` | OOXML archiveの最大member数 | デフォルト10000、`0`で無制限 | 描画・抽出両方の`MaxOOXMLMembers`へ渡す |
+| `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | OOXML archive内の単一memberの最大展開サイズ | デフォルト256 MiB、`0`で無制限 | 描画・抽出両方の`MaxOOXMLMemberBytes`へ渡す |
+| `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | OOXML archive全体の最大展開サイズ | デフォルト1 GiB、`0`で無制限 | 描画・抽出両方の`MaxOOXMLTotalBytes`へ渡す |
 
 Gatewayはrendererのdefault optionsを起点にし、未設定時はrendererと同じ防御的上限を維持する。運用要件に応じて各上限を環境変数で変更できるが、値を増やすか`0`（無制限）にすると、過大なPDF、画像、OOXML archiveによるCPU・memory・disk消費のリスクが高まる。
 
 ### 出力の一貫性
 
-`document-image-renderer`は途中で失敗した場合に生成済み画像を残し、出力directory内の無関係なfileを削除しない。そのためGatewayは変換開始前に専有する`derived` directoryと同階層の`manifest.json`を削除して初期化する。変換、manifest生成、権限設定のいずれかが失敗した場合も両方を削除し、不完全な成果物を残さない。変換成功時はdirectoryを`0700`、配下のfileと`manifest.json`を`0600`にする。
+`document-image-renderer`は途中で失敗した場合に生成済み画像を残し、出力directory内の無関係なfileを削除しない。そのためGatewayは変換開始前に専用の`derived` directoryと同階層の`manifest.json`を削除して初期化する。変換、manifest生成、権限設定のいずれかが失敗した場合も両方を削除し、不完全なartifactを残さない。変換成功時はdirectoryを`0700`、配下のfileと`manifest.json`を`0600`にする。
 
 
 ## 推論リクエスト
 
-### file_idからアーティファクトへの解決
+### file_idからartifactへの解決
 
-`file_id`を含む推論リクエストは、展開の前に次の順で変換成果物へ解決される。
+`file_id`を含む推論リクエストは以下の順で処理される。
 
 ```mermaid
 sequenceDiagram
@@ -520,30 +523,60 @@ sequenceDiagram
   participant API as Inference API
   participant Files as files.Service
   participant Store as SQLite
-  participant Disk as files/<tenant>/<file_id>/
+  participant Disk as Storage
+  participant VLLM as vLLM
 
   Client->>API: input_file {file_id}
   API->>Files: Resolve(file_id, tenant_id)
   Files->>Store: Get(file_id, tenant_id)
   Store-->>Files: record (status, manifest_path)
-  alt status=uploaded/processing
-    Files-->>API: 409 file_not_ready
+  loop status=uploaded/processing
+    Files->>Files: wait with backoff and jitter (100ms to 2.5s) or request/service cancellation
+    Files->>Store: Get(file_id, tenant_id)
+    Store-->>Files: current record
+  end
+  alt request deadline exceeded
+    API-->>Client: 504 request_timeout
+  else deleted/expired
+    Files-->>API: 404 file_not_found
+  else file service stopped
+    Files-->>API: 503 service_unavailable
   else status=failed
     Files-->>API: 422 file_processing_failed
   else status=processed
     Files->>Files: acquire read lease
     Files->>Disk: read manifest.json
     Files-->>API: record + manifest + release
-    API->>Disk: read derived/<text_path> / <image_path>
+    API->>Disk: read text and image artifacts
     API->>API: expand into content parts
     API->>Files: release lease
+    API->>API: inject documentInstruction
+    API->>VLLM: POST /v1/responses or /v1/chat/completions<br/>(expanded payload via forwardJSON)
+    alt upstream failed before response headers
+      API-->>Client: 504 request_timeout / 502 model_upstream_error
+    else upstream responded
+      VLLM-->>API: inference response (JSON or SSE)
+      API-->>Client: forward response
+    end
   end
 ```
 
-1. `files.Service.Resolve`が`(file_id, tenant_id)`でSQLiteからrecordを取得する。recordが存在しない場合は`404 file_not_found`を返す。
-2. statusが`uploaded` / `processing`なら`409 file_not_ready`、`failed`なら`422 file_processing_failed`を返す。推論で参照する前にクライアントは`GET /v1/files/{file_id}`で`status: "processed"`を確認する。
+1. `files.Service.Resolve`が`(file_id, tenant_id)`をキーとしてSQLiteからrecordを取得する。recordが存在しない場合は`404 file_not_found`を返す。
+2. statusが`uploaded` / `processing`なら、100msから始めて2倍ずつ最大2秒まで間隔を広げながら定期的にrecordを取得し、変換完了まで待機する。各間隔には同時リクエストによる読み取りの同期を防ぐため0〜500msのジッターを加える。`failed`なら`422 file_processing_failed`、ファイルが存在しない場合は`404 file_not_found`を返す。クライアント切断時はバックグラウンド変換をキャンセルせずに待機を中断し、ファイルサービス停止時は`503 service_unavailable`を返す。
 3. `processed`ならread leaseを取得してから`manifest_path`の`manifest.json`を読み込む。leaseはDeleteやjanitorによるdirectory削除と推論中の読み込みの競合（TOCTOU）を防ぐ。
-4. manifestの各`ManifestPart`が参照する`derived/`配下のtext artifactとimage artifactを読み込み、content partへ展開する。読み込みが完了したらleaseを解放する。
+4. manifestの各`ManifestPart`が参照する`derived/`配下のtext artifactとimage artifactを読み込み、推論リクエストのcontent partへ展開する。読み込みが完了したらleaseを解放する。
+
+推論およびvLLMへのpassthroughのhandlerは、`REQUEST_TIMEOUT_SECONDS`（デフォルト300秒、`0`で設定上の期限なし）からrequest contextの共通deadlineを設定する。呼び出し元の期限の方が短い場合はそちらを優先する。
+
+ファイル変換およびバックエンド(vLLM)へのリクエストにおける期限超過は、いずれも`504 request_timeout`を返す。
+レスポンス開始後はstream/非streamとも`REQUEST_TIMEOUT_SECONDS`による送信の中断を行わない。
+
+同時リクエスト数は`MAX_CONCURRENT_REQUESTS`（デフォルト`0`（無制限））で非負整数として設定するものとし、上限到達時はOpenAI形式の`429 too_many_requests`（message: `The gateway is busy.`）を返す。
+最終レスポンスヘッダー送信時にスロットを解放し、stream/非streamともレスポンス送信中のコネクションはカウントしない。
+
+ファイル変換処理実行中のキャンセルには対応していない。
+推論リクエスト時は、inline入力の準備（取得・Converter解決・検証・変換）の前後、テキスト・画像変換の前後、およびバックエンドへのリクエスト転送前にcontextを確認する。ファイル変換の待機はcontextのキャンセルで即時に中断する。
+期限切れの変換結果は使用せず、キャンセルされたテキスト・画像変換の出力を削除し、request専用の一時artifactもhandler終了時に削除する。
 
 `file_data`と`file_url`はFiles APIの保存対象ではないため、この解決経路を通らない。代わりにrequest専用の一時directoryへsourceを保存し、同じrequest内でConverterの解決・検証・変換を同期的に実行してmanifestを生成する。一時directoryはrequest終了時に削除する。
 
@@ -552,14 +585,12 @@ sequenceDiagram
 Responsesの`input_file`、Chat Completionsの`file`をcontent partへ展開する。ファイル参照は任意であり、`input_file` / `file` partを1つも含まないリクエストは専用の解釈・再シリアライズを行わず、request body、query parameter、通常のheaderを保ったままvLLMへpassthroughする。この場合`documentInstruction`も注入しない（注入は実際にファイルを展開した場合のみ行う）。`input`が文字列の場合も同様に展開対象のpartが存在しないため、文字列のまま転送する。
 
 1. 抽出テキストを`<document ...>`で囲んで展開する
-2. 変換画像がある場合は`image_url`にbase64 data URLとして展開する（全artifact合計で`MAX_DOCUMENT_PAGES`、既定50個まで）
+2. 変換画像がある場合は`image_url`にbase64 data URLとして展開する（全artifact合計で`MAX_DOCUMENT_PAGES`、デフォルト50個まで）
 3. 呼び出し元が指定した通常のcontent partをそのまま展開する
 
 ファイルを展開した場合は、ドキュメント内容を信頼できないsource materialとして扱う指示（`documentInstruction`）をResponsesでは`instructions`の先頭へ、Chatでは先頭の`system message`として注入する。
 
 Responsesは`file_id`、`file_data`、`file_url`、Chatは`file_id`と`file_data`を受け付ける。`file_url`はuserinfoなしのHTTPS:443、公開IP、最大4 redirectに限定し、各redirectを再検証する。DNSで得た全addressを検証し、接続時も再解決・再検証したIPへ直接dialすることでDNS rebindingを防ぐ。なおOpenAIのChat Completions APIは`file` inputをサポートしないが、GatewayはChat Completionsでも`file_id`と`file_data`を拡張として受け付ける。
-
-`file_data`はbase64でエンコードされたファイル内容をリクエストボディに含めるため、複数ファイルを同時に送るとボディが`MAX_FILE_BYTES`の数倍に膨らむ。このため、ファイル参照を含む推論リクエストのボディ全体には`MAX_REQUEST_BODY_BYTES`（既定`MAX_FILE_BYTES`の4倍）を適用する。ファイル参照を含まないpassthroughリクエストにはこの制限を適用しない。`MAX_FILE_BYTES`は1ファイルあたりの上限、`MAX_REQUEST_BODY_BYTES`はファイル参照を含むリクエスト全体の上限として機能する。1ファイルのデコード後サイズが`MAX_FILE_BYTES`を超えると`file_too_large`（400）で拒否され、ファイル参照を含むリクエストボディ全体が`MAX_REQUEST_BODY_BYTES`を超えると`request_too_large`（400）で拒否される。
 
 ### Responses API（`POST {VLLM_BASE_URL}/responses`）
 ファイルを展開した場合、`documentInstruction`を`instructions`の先頭へ注入する。
@@ -602,12 +633,12 @@ Responsesは`file_id`、`file_data`、`file_url`、Chatは`file_id`と`file_data
 ```
 
 - テキストpartは`<document filename="..." [part="N" | page="N"]>`タグで囲む。text-only artifactは`part`、描画画像と対応するartifactは`page`属性付きで展開する。
-- 画像partはbase64 data URL（`data:<media_type>;base64,...`）で、`MAX_DOCUMENT_PAGES`（既定50）個まで展開する。
+- 画像partはbase64 data URL（`data:<media_type>;base64,...`）で、`MAX_DOCUMENT_PAGES`（デフォルト50）個まで展開する。
 
 ## Authentication
 
-認証無効時はクライアントのAPI KEYを検証しない。
-認証必須時(`GATEWAY_AUTH_REQUIRED=true`)はGatewayでAPI KEY(`GATEWAY_API_KEY`)を検証し、tokenのSHA-256先頭32桁をtenant IDとする。
+認証無効時はクライアントのAPI keyを検証しない。
+認証必須時(`GATEWAY_AUTH_REQUIRED=true`)はGatewayでAPI key(`GATEWAY_API_KEY`)を検証し、tokenのSHA-256先頭32桁をtenant IDとする。
 どちらの場合もクライアントのAuthorizationは上流へ転送せず、vLLMには`VLLM_API_KEY`を送信して認証を行う。
 
 `/v1`以下はFiles APIを含めて認証対象とするが、`GET /health`は認証せずプロセスの稼働状態だけを返す。
@@ -633,13 +664,14 @@ routeは`NewHandler`が`http.ServeMux`へ登録する。`POST /v1/responses`は`
 
 #### Responses / Chat Completions
 
-- `Server.handleInference`（`inference.go`）が`POST /v1/responses`と`POST /v1/chat/completions`の共通entry pointであり、ファイル参照（`file_id`、`file_data`、`file_url`）を含まないリクエストも受理する。JSON parseはファイル参照の有無を判定するためだけに行い、parseに失敗した場合もエラーにせず元のbodyをそのまま転送する。ファイル参照を含まない場合、payloadの展開と`documentInstruction`の注入や`model`検証と`MAX_REQUEST_BODY_BYTES`検証も適用されず、元のcontentのまま`Server.forwardRequest`でvLLMへ転送する。つまりファイル入力は任意（optional）であり、ファイルなしの通常の推論リクエストも同じendpointで処理できる。
+- `Server.handleInference`（`inference.go`）が`POST /v1/responses`と`POST /v1/chat/completions`の共通entry pointであり、ファイル参照（`file_id`、`file_data`、`file_url`）を含まないリクエストも受理する。全受信bodyの読み込み時に`MAX_REQUEST_BODY_BYTES`を適用する。上限以内ではJSON parseでファイル参照の有無を判定し、parseに失敗した場合もGatewayのJSON検証エラーにはせず元のbodyをそのまま転送する。ファイル参照を含まない場合、payloadの展開と`documentInstruction`の注入や`model`検証は適用せず、元のcontentのまま`Server.forwardRequest`でvLLMへ転送する。
 - ファイル参照を展開した場合は`Server.forwardJSON`で再シリアライズしたpayloadをvLLMへ転送する。
 
 ### passthrough
 
 - `Server.passthrough`（`proxy.go`）が`POST /v1/responses`、`POST /v1/chat/completions`を除く`/v1/*`のうち、`/v1/files`とその配下以外を`Server.forwardRequest`へ委譲する。Responses/Chatの別methodや未登録のendpointはpassthroughされる。
 - requestはmethod、raw query、body、end-to-end headerを維持する。
+- upstream responseの`Content-Type`が`text/event-stream`の場合、writeごとにflushする。`/v1/completions`などのpassthrough endpointも対象となる。
 - クライアントの`Authorization`は削除して`VLLM_API_KEY`によるBearer認証へ置換する。
 - `copyHeaders`が固定のhop-by-hop headerと`Connection` headerが列挙するheaderをrequest/responseの両方向で除外する。`Host`と`Content-Length`も転送対象から除外する。
 - `Host`はvLLMのhostへ置き換え、`Content-Length`は転送bodyからGoのHTTP clientが設定する。
@@ -650,4 +682,4 @@ routeは`NewHandler`が`http.ServeMux`へ登録する。`POST /v1/responses`は`
 
 ## Operational Boundary
 
-単一process、SQLite、local filesystemを運用単位とする。conversion workerはprocess内で複数起動でき、推論入力展開・content取得中のartifact readと削除の競合はprocess内read leaseで保護する。複数replica間のqueue/lease共有、rate limit、malware scan、高可用化は対象外である。
+単一process、SQLite、local filesystemを運用単位とする。conversion workerはprocess内で複数起動でき、推論入力展開・content取得中のartifact readと削除の競合はprocess内read leaseで保護する。複数replica間のqueue/lease共有、malware scan、高可用化は対象外である。

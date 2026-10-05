@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"context"
 	"errors"
 	_ "image/jpeg"
 	_ "image/png"
@@ -20,10 +21,21 @@ func validateImage(source, format string) error {
 }
 
 // convertImage converts an image file into a single-part document.
-func convertImage(source, outputDir, mediaType string) (Result, error) {
+func convertImage(ctx context.Context, source, outputDir, mediaType string) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	config, _, err := imageSize(source)
+	if contextError := ctx.Err(); contextError != nil {
+		return Result{}, contextError
+	}
 	if err != nil {
 		return Result{}, err
 	}
-	return convertImageDocument(source, outputDir, mediaType, config.Width, config.Height)
+	result, err := convertImageDocument(source, outputDir, mediaType, config.Width, config.Height)
+	if contextError := ctx.Err(); contextError != nil {
+		_ = removeConversionOutput(outputDir)
+		return Result{}, contextError
+	}
+	return result, err
 }

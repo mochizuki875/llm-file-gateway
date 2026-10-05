@@ -2,11 +2,61 @@ package converter
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestTextConverterCancellation(t *testing.T) {
+	for _, phase := range []string{"before_extraction", "during_extraction"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			called := false
+			documentConverter := newTextConverter(".txt", "text/plain", func(string) (string, error) {
+				called = true
+				cancel()
+				return "extracted text", nil
+			})
+			if phase == "before_extraction" {
+				cancel()
+			}
+			root := t.TempDir()
+			outputDir := filepath.Join(root, "derived")
+			_, err := documentConverter.Convert(ctx, filepath.Join(root, "missing.txt"), outputDir, Options{})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want context canceled", err)
+			}
+			if called != (phase == "during_extraction") {
+				t.Fatalf("extractor called = %t, phase = %s", called, phase)
+			}
+			if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
+				t.Fatalf("conversion output exists after cancellation: %v", err)
+			}
+		})
+	}
+}
+
+func TestImageConvertersRejectCanceledContext(t *testing.T) {
+	for _, extension := range []string{".jpg", ".jpeg", ".png"} {
+		t.Run(extension, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			root := t.TempDir()
+			source := filepath.Join(root, "missing"+extension)
+			documentConverter, err := newDefaultDispatcherForTest().ResolveConverter(context.Background(), source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = documentConverter.Convert(ctx, source, filepath.Join(root, "derived"), Options{})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want context canceled before opening the image", err)
+			}
+		})
+	}
+}
 
 func TestTextConverters(t *testing.T) {
 	tests := map[string]struct {

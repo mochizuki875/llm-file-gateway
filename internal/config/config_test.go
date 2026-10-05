@@ -43,6 +43,39 @@ func TestLoadGatewayListenAddress(t *testing.T) {
 	}
 }
 
+func TestLoadMaxConcurrentRequests(t *testing.T) {
+	t.Setenv("VLLM_MODEL", "test-model")
+	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")
+	t.Setenv("VLLM_API_KEY", "upstream-key")
+	for _, test := range []struct {
+		value string
+		want  int
+	}{
+		{value: "", want: 0},
+		{value: "0", want: 0},
+		{value: "12", want: 12},
+	} {
+		t.Run("value_"+test.value, func(t *testing.T) {
+			t.Setenv("MAX_CONCURRENT_REQUESTS", test.value)
+			settings, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.MaxConcurrentRequests != test.want {
+				t.Fatalf("MaxConcurrentRequests = %d, want %d", settings.MaxConcurrentRequests, test.want)
+			}
+		})
+	}
+	for _, value := range []string{"-1", "invalid", "1.5"} {
+		t.Run("invalid_"+value, func(t *testing.T) {
+			t.Setenv("MAX_CONCURRENT_REQUESTS", value)
+			if _, err := Load(); err == nil || err.Error() != "MAX_CONCURRENT_REQUESTS must be a non-negative integer" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadMaxDocumentPages(t *testing.T) {
 	t.Setenv("VLLM_MODEL", "test-model")
 	t.Setenv("VLLM_BASE_URL", "http://vllm.test/v1")

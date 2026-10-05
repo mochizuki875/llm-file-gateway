@@ -5,8 +5,8 @@
 ![](../images/logo.png)
 
 [vLLMのAPI](https://docs.vllm.ai/en/stable/serving/online_serving/)に対して[OpenAI Files API](https://developers.openai.com/api/reference/resources/files)との互換性を持たせるGatewayです。
-PDF、Officeファイル、テキスト、画像などのファイルをOpenAI Files API互換のAPIでアップロードすると、アップロード時に`file_id`が発行され、画像変換およびテキスト抽出が非同期で行われてアーティファクトとして保存されます。
-`file_id`をResponses APIまたはChat Completions APIに付加することで、バックエンドにFiles APIでアップロードしたファイルに基づくアーティファクトを画像(base64)および抽出テキストとして転送することができます。
+PDF、Officeファイル、テキスト、画像などのファイルをOpenAI Files API互換のAPIでアップロードすると、アップロード時に`file_id`が発行され、画像変換およびテキスト抽出が非同期で行われてartifactとして保存されます。
+`file_id`をResponses APIまたはChat Completions APIに付加することで、バックエンドにFiles APIでアップロードしたファイルに基づくartifactを画像(base64)および抽出テキストとして転送することができます。
 
 ファイル画像変換には[document-image-renderer](https://github.com/mochizuki875/document-image-renderer)を使用します。
 
@@ -16,13 +16,12 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 - `GATEWAY_API_KEY`によるGatewayでのToken認証
 
 ## Limitations
-- 複数の`GATEWAY_API_KEY`による認証(マルチテナント)には未対応です
+- 複数の`GATEWAY_API_KEY`による認証（マルチテナント）には未対応です
 - HTMLやMarkdownにおける外部URLや埋め込み画像は取得しません
 - Officeファイルのフォントやレイアウト、改ページの完全な再現は保証しません
 - GatewayはステートフルなAll-in-One構成になっているため、複数インスタンスによるスケーリングには対応していません
 - OpenAI Files APIのファイル変換、token使用量、回答品質との完全な一致は保証しません
-- Responses APIの`input_file.detail`は受理しますが、`low`/`high`の変換品質には反映しません(ファイルは常にGatewayの既定の変換設定で処理され、モデルには`detail: "auto"`の画像として転送されます)
-- LLM File GatewayはOpenAI Files APIとの互換性を持たせることを目的としているため、一般的なGatewayに期待されるrate limit、request size制限などの機能は含まれていません
+- Responses APIの`input_file.detail`は受理しますが、`low`/`high`の変換品質には反映しません（ファイルは常にGatewayのデフォルトの変換設定で処理され、モデルには`detail: "auto"`の画像として転送されます）
 
 ## Supported APIs
 
@@ -39,7 +38,8 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 | Other vLLM APIs | `/v1/*` (Passed through) |
 
 - `GET /health`はプロセスの稼働だけを示し、SQLite、LibreOffice、vLLMへの接続性は検査しません。
-- Files APIでファイルをアップロードした際の画像変換およびテキスト抽出は非同期で行われます。推論で参照する前に`GET /v1/files/{file_id}`で処理状態(`status: "processed"`)を確認してください。変換中は`409 file_not_ready`、失敗後は`422 file_processing_failed`を返します。
+- Files APIでファイルをアップロードした際の画像変換およびテキスト抽出は非同期で行われます。変換待ちまたは変換中の`file_id`を参照する推論リクエストは、変換処理完了まで内部で待機してからvLLMへ転送されます。
+- `GET /v1/files/{file_id}`の`status`フィールドにてファイルの状態を確認できます。`status`フィールドの値は`uploaded`（保存済み。変換待ちまたは変換中）、`processed`（変換完了）、`error`（変換失敗）のいずれかです。変換失敗は`422 file_processing_failed`、待機中の削除または期限切れは`404 file_not_found`を返します。
 - Files APIが所有するパスの未対応メソッドはvLLMへ転送せず、`405`を返します。
 
 ## Supported Formats
@@ -87,17 +87,17 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 
 | Environment variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `VLLM_MODEL` | Yes | - | クライアントからのリクエストで許可するモデル名(vLLMのモデル名と一致する必要があります) |
+| `VLLM_MODEL` | Yes | - | クライアントからのリクエストで許可するモデル名（vLLMのモデル名と一致する必要があります） |
 | `VLLM_BASE_URL` | Yes | - | `/v1`で終わるvLLMのURL |
-| `GATEWAY_HOST` | No | `127.0.0.1` | Gatewayの待受けホスト(全てのネットワークインターフェースで待ち受ける場合は`0.0.0.0`) |
-| `GATEWAY_PORT` | No | `8080` | Gatewayの待受けポート |
+| `GATEWAY_HOST` | No | `127.0.0.1` | Gatewayの待ち受けホスト（すべてのネットワークインターフェースで待ち受ける場合は`0.0.0.0`） |
+| `GATEWAY_PORT` | No | `8080` | Gatewayの待ち受けポート |
 | `GATEWAY_AUTH_REQUIRED` | No | `false` | GatewayでBearer tokenを検証するか |
-| `GATEWAY_API_KEY` | Conditional | - | Gateway認証用APIキー |
-| `VLLM_API_KEY` | Yes | - | vLLM認証用APIキー |
+| `GATEWAY_API_KEY` | Conditional | - | Gateway認証用API key |
+| `VLLM_API_KEY` | Yes | - | vLLM認証用API key |
 | `GATEWAY_DATA_DIR` | No | `gateway-data` | SQLiteとファイルの保存先ディレクトリ |
 | `FILE_TTL_SECONDS` | No | `300` | デフォルトのファイル保持期間(sec)および`expires_after.seconds`で指定可能な上限値（`0`で無制限） |
-| `MAX_FILE_BYTES` | No | `52428800`(50 MiB) | 1ファイルの最大サイズ(bytes)（`0`で無制限） |
-| `MAX_REQUEST_BODY_BYTES` | No | `MAX_FILE_BYTES`の4倍 | ファイル参照を含む`/v1/responses`、`/v1/chat/completions`への推論リクエストのボディ全体の最大サイズ(bytes)。JSONおよびBase64化されたfile_dataを含む（ファイル参照なしは適用対象外、`0`で無制限）|
+| `MAX_FILE_BYTES` | No | `52428800` (50 MiB) | 1ファイルの最大サイズ(bytes)（`0`で無制限） |
+| `MAX_REQUEST_BODY_BYTES` | No | `MAX_FILE_BYTES`の4倍 | 推論リクエストの受信ボディの最大サイズ(bytes)（`0`で無制限） |
 | `MAX_DOCUMENT_PAGES` | No | `50` | Gatewayで受け付けるPDF/Officeの最大ページ数（`0`で無制限） |
 | `MAX_DOCUMENT_TEXT_CHARS` | No | `500000` | 1ファイルから抽出するテキストの最大文字数（`0`で無制限） |
 | `MAX_DOCUMENT_PDF_BYTES` | No | `134217728` (128 MiB) | rendererが処理するPDFの最大サイズ(bytes)（`0`で無制限） |
@@ -108,17 +108,18 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | `MAX_DOCUMENT_OOXML_MEMBERS` | No | `10000` | OOXML archiveの最大member数（`0`で無制限） |
 | `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | No | `268435456` (256 MiB) | OOXML archive内の単一memberの最大展開サイズ(bytes)（`0`で無制限） |
 | `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | No | `1073741824` (1 GiB) | OOXML archive全体の最大展開サイズ(bytes)（`0`で無制限） |
+| `MAX_CONCURRENT_REQUESTS` | No | `0` | リクエスト数の上限（`0`で無制限）。Health APIは対象外。 |
 | `DOCUMENT_DPI` | No | `300` | PDF/Officeを画像へ変換する際の解像度(DPI)。1〜1200の整数 |
 | `DOCUMENT_RENDER_TIMEOUT_SECONDS` | No | `300` | PDF/Officeの画像変換timeout(sec)（`0`で無制限）|
 | `DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS` | No | `300` | Office変換で使用するLibreOfficeのtimeout(sec)（`0`で無制限） |
 | `DOCUMENT_TEXT_EXTRACTION_ENABLED` | No | `true` | PDFとOfficeからテキストを抽出するか |
 | `CONVERSION_WORKERS` | No | `2` | 並行してファイルを変換するworker数。正の整数で変更可能 |
 | `CONVERSION_QUEUE_CAPACITY` | No | `0` | workerの処理開始を待つ変換jobをqueueに保持できる件数（`0`で無制限） |
-| `REQUEST_TIMEOUT_SECONDS` | No | `300` | vLLM通信のtimeout。streamingではstream全体に適用（`0`で無制限） |
+| `REQUEST_TIMEOUT_SECONDS` | No | `300` | ファイル待機・準備・vLLM通信からレスポンスヘッダー返却開始までで共有する期限。vLLMへのpassthroughリクエストにも適用（`0`で無制限） |
 | `LOGLEVEL` | No | `0` | ログverbosity（`0`: 通常、`1`: DEBUG、`2`: 高頻度の詳細ログ） |
 
 - `GATEWAY_AUTH_REQUIRED=true`を設定した場合はGatewayでの認証が有効となり、`GATEWAY_API_KEY`の設定が必須となります。
-- GatewayからvLLMへの認証は`VLLM_API_KEY`を用いて行われるため、Gatewayに送信された`OPENAI_API_KEY`は転送されません。(`VLLM_API_KEY`は常に必須です。)
+- GatewayからvLLMへの認証は`VLLM_API_KEY`を用いて行われるため、Gatewayに送信された`OPENAI_API_KEY`は転送されません。（`VLLM_API_KEY`は常に必須です。）
 - `GET /health`は認証対象外です。
 - `DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合、画像変換に加えてテキスト抽出を行い、両方をバックエンドに送信します。
 - クライアントが指定するファイル保持期間(`expires_after.seconds`)の上限は`FILE_TTL_SECONDS`（`0`で無制限）です。未指定の場合は`FILE_TTL_SECONDS`に設定された値が適用されます。
@@ -155,7 +156,7 @@ curl -sS --fail http://localhost:8080/v1/models \
 
 公開ポートは`GATEWAY_DOCKER_PORT=18080 docker compose up --build -d`のように変更できます。
 
-Composeはコンテナ内のGatewayを`0.0.0.0:8080`で待ち受けさせ、カレントディレクトリの`.env`を展開してコンテナへ渡します。保存データを永続化するvolumeは既定のCompose構成に含まれないため、コンテナを削除するとSQLiteと保存ファイルも失われます。
+Composeはコンテナ内のGatewayを`0.0.0.0:8080`で待ち受けさせ、カレントディレクトリの`.env`を展開してコンテナへ渡します。保存データを永続化するvolumeはデフォルトのCompose構成に含まれないため、コンテナを削除するとSQLiteと保存ファイルも失われます。
 
 ```bash
 docker compose up --build -d
@@ -204,7 +205,7 @@ python openai_file_summary_stream.py
 
 ### curl
 
-curlコマンドを用いてファイルのアップロード、変換完了待ち、Responses APIによる要約、削除を順に実行します。
+curlコマンドを用いてファイルのアップロード、Responses APIによる推論リクエスト、削除を順に実行します。
 
 ```bash
 cd example
@@ -217,16 +218,7 @@ FILE_ID=$(curl --fail --silent "$OPENAI_BASE_URL/files" \
   -F "file=@$DOCUMENT" | jq -r .id)
 echo "Uploaded: $FILE_ID"
 
-# Wait until the document is processed by the Gateway
-while true; do
-  FILE_STATUS=$(curl --fail --silent "$OPENAI_BASE_URL/files/$FILE_ID" \
-    -H "Authorization: Bearer $OPENAI_API_KEY" | jq -r .status)
-  [[ "$FILE_STATUS" == "processed" ]] && break
-  [[ "$FILE_STATUS" == "error" ]] && { echo "Conversion failed" >&2; exit 1; }
-  sleep 1
-done
-
-# Summarize the document using the Responses API
+# Summarize the document; the Gateway waits for conversion automatically
 curl --fail --silent "$OPENAI_BASE_URL/responses" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H 'Content-Type: application/json' \

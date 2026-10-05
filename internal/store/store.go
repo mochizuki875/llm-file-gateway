@@ -98,8 +98,8 @@ CREATE TABLE IF NOT EXISTS files (
     expires_at INTEGER NOT NULL,
     deleted_at INTEGER
 );
-CREATE INDEX IF NOT EXISTS files_tenant_created ON files (tenant_id, created_at);
 CREATE INDEX IF NOT EXISTS files_tenant_created_id ON files (tenant_id, created_at, id);
+DROP INDEX IF EXISTS files_tenant_created;
 CREATE INDEX IF NOT EXISTS files_status ON files (status);
 CREATE INDEX IF NOT EXISTS files_expires_at ON files (expires_at);`
 	if _, err := store.database.ExecContext(ctx, schema); err != nil {

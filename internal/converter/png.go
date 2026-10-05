@@ -10,6 +10,6 @@ func (pngConverter) MediaType() string { return "image/png" }
 func (pngConverter) Validate(source string) error {
 	return validateImage(source, "png")
 }
-func (documentConverter pngConverter) Convert(_ context.Context, source, outputDir string, _ Options) (Result, error) {
-	return convertImage(source, outputDir, documentConverter.MediaType())
+func (documentConverter pngConverter) Convert(ctx context.Context, source, outputDir string, _ Options) (Result, error) {
+	return convertImage(ctx, source, outputDir, documentConverter.MediaType())
 }

@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,11 +23,32 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mochizuki875/llm-file-gateway/internal/apierror"
 	"github.com/mochizuki875/llm-file-gateway/internal/config"
 	"github.com/mochizuki875/llm-file-gateway/internal/converter"
 	"github.com/mochizuki875/llm-file-gateway/internal/files"
 	"github.com/mochizuki875/llm-file-gateway/internal/store"
 )
+
+type deadlineIgnoringConverter struct {
+	ctx           context.Context
+	phase         string
+	convertCalled chan struct{}
+}
+
+func (deadlineIgnoringConverter) Extension() string { return ".deadline" }
+func (deadlineIgnoringConverter) MediaType() string { return "text/plain" }
+func (documentConverter deadlineIgnoringConverter) Validate(string) error {
+	if documentConverter.phase == "validation" {
+		<-documentConverter.ctx.Done()
+	}
+	return nil
+}
+func (documentConverter deadlineIgnoringConverter) Convert(ctx context.Context, _, _ string, _ converter.Options) (converter.Result, error) {
+	documentConverter.convertCalled <- struct{}{}
+	<-ctx.Done()
+	return converter.Result{}, nil
+}
 
 type blockingHeaderWriter struct {
 	*httptest.ResponseRecorder
@@ -55,6 +77,128 @@ func TestHealth(t *testing.T) {
 	}
 	if got, want := response.Body.String(), "{\"status\":\"ok\"}\n"; got != want {
 		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+func TestConcurrencyLimitReleasesSlot(t *testing.T) {
+	for _, mode := range []string{"headers", "implicit", "error", "return", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			server := &Server{slots: make(chan struct{}, 1)}
+			entered := make(chan struct{})
+			proceed := make(chan struct{})
+			started := make(chan struct{})
+			finish := make(chan struct{})
+			done := make(chan struct{})
+			defer func() {
+				close(finish)
+				<-done
+			}()
+			handler := server.withConcurrencyLimit(func(response http.ResponseWriter, _ *http.Request) {
+				close(entered)
+				<-proceed
+				switch mode {
+				case "return":
+					return
+				case "panic":
+					panic("test panic")
+				case "implicit":
+					_, _ = response.Write([]byte("body"))
+				case "error":
+					response.WriteHeader(http.StatusBadRequest)
+				default:
+					response.WriteHeader(http.StatusEarlyHints)
+					if len(server.slots) != 1 {
+						t.Error("informational headers released the slot")
+					}
+					response.WriteHeader(http.StatusOK)
+				}
+				close(started)
+				<-finish
+			})
+			go func() {
+				defer close(done)
+				defer func() { _ = recover() }()
+				handler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
+			}()
+			<-entered
+			probe := server.withConcurrencyLimit(func(response http.ResponseWriter, _ *http.Request) {
+				response.WriteHeader(http.StatusNoContent)
+			})
+			rejected := httptest.NewRecorder()
+			probe(rejected, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+			close(proceed)
+			if rejected.Code != http.StatusTooManyRequests || !strings.Contains(rejected.Body.String(), `"code":"too_many_requests"`) {
+				t.Fatalf("rejection = %d %s", rejected.Code, rejected.Body.String())
+			}
+			select {
+			case <-started:
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("handler did not start its response or finish")
+			}
+			accepted := httptest.NewRecorder()
+			probe(accepted, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+			if accepted.Code != http.StatusNoContent {
+				t.Fatalf("status after release = %d", accepted.Code)
+			}
+		})
+	}
+}
+
+func TestConcurrencyLimitRoutes(t *testing.T) {
+	for _, limit := range []int{0, 1} {
+		t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
+			settings, dataStore, service := testDependencies(t)
+			settings.MaxConcurrentRequests = limit
+			entered := make(chan struct{})
+			proceed := make(chan struct{})
+			done := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Query().Has("hold") {
+					close(entered)
+					<-proceed
+				}
+				response.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			handler := NewHandler(settings, dataStore, service)
+			go func() {
+				defer close(done)
+				handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses?hold", strings.NewReader(`{}`)))
+			}()
+			defer func() {
+				close(proceed)
+				<-done
+			}()
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("upstream request not received")
+			}
+			for _, route := range []struct {
+				method string
+				path   string
+				status int
+			}{
+				{http.MethodPost, "/v1/responses", http.StatusOK},
+				{http.MethodPost, "/v1/chat/completions", http.StatusOK},
+				{http.MethodGet, "/v1/models", http.StatusOK},
+				{http.MethodGet, "/health", http.StatusOK},
+				{http.MethodGet, "/v1/files", http.StatusOK},
+				{http.MethodPatch, "/v1/files/missing", http.StatusMethodNotAllowed},
+			} {
+				want := route.status
+				if limit > 0 && route.path != "/health" {
+					want = http.StatusTooManyRequests
+				}
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`)))
+				if response.Code != want {
+					t.Errorf("%s %s: status = %d, want %d: %s", route.method, route.path, response.Code, want, response.Body.String())
+				}
+			}
+		})
 	}
 }
 
@@ -604,6 +748,7 @@ func TestInferenceStreamsUpstreamEvents(t *testing.T) {
 	}{
 		{name: "responses", endpoint: "responses", payload: `{"model":"test-model","input":"hello","stream":true}`},
 		{name: "chat_completions", endpoint: "chat/completions", payload: `{"model":"test-model","messages":[{"role":"user","content":"hello"}],"stream":true}`},
+		{name: "passthrough_completions", endpoint: "completions", payload: `{"model":"test-model","prompt":"hello","stream":true}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			releaseSecondEvent := make(chan struct{})
@@ -627,15 +772,22 @@ func TestInferenceStreamsUpstreamEvents(t *testing.T) {
 				_, _ = io.WriteString(response, "data: second\n\n")
 				response.(http.Flusher).Flush()
 			}))
-			defer upstream.Close()
+			defer func() {
+				releaseOnce.Do(func() { close(releaseSecondEvent) })
+				upstream.Close()
+			}()
 
 			settings, dataStore, service := testDependencies(t)
 			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
 			settings.VLLMModel = "test-model"
 			gateway := httptest.NewServer(NewHandler(settings, dataStore, service))
-			defer gateway.Close()
+			defer func() {
+				releaseOnce.Do(func() { close(releaseSecondEvent) })
+				gateway.Close()
+			}()
 
-			response, err := http.Post(
+			client := &http.Client{Timeout: 5 * time.Second}
+			response, err := client.Post(
 				gateway.URL+"/v1/"+test.endpoint,
 				"application/json",
 				strings.NewReader(test.payload),
@@ -1367,7 +1519,534 @@ func TestSafeHTTPErrorOmitsURL(t *testing.T) {
 	}
 }
 
-func TestUpstreamTimeoutReturnsModelTimeout(t *testing.T) {
+func TestInferenceWaitsForFileWithinRequestDeadline(t *testing.T) {
+	for _, endpoint := range []string{"responses", "chat/completions"} {
+		for _, test := range []struct {
+			name       string
+			status     string
+			timeout    time.Duration
+			wantStatus int
+			wantCode   string
+		}{
+			{name: "uploaded", status: "uploaded", timeout: time.Second, wantStatus: 200},
+			{name: "processing", status: "processing", timeout: time.Second, wantStatus: 200},
+			{name: "unlimited", status: "uploaded", wantStatus: 200},
+			{name: "failed", status: "processing", timeout: time.Second, wantStatus: 422, wantCode: "file_processing_failed"},
+			{name: "deleted", status: "uploaded", timeout: time.Second, wantStatus: 404, wantCode: "file_not_found"},
+			{name: "timeout", status: "uploaded", timeout: 50 * time.Millisecond, wantStatus: 504, wantCode: "request_timeout"},
+			{name: "multiple_files_timeout", status: "uploaded", timeout: 300 * time.Millisecond, wantStatus: 504, wantCode: "request_timeout"},
+			// The deadline must outlast the first backoff poll (100ms plus
+			// up to 500ms jitter) so the upstream is reached before expiry.
+			{name: "upstream_timeout", status: "processing", timeout: time.Second, wantStatus: 504, wantCode: "request_timeout"},
+			{name: "canceled", status: "uploaded", timeout: time.Second},
+		} {
+			t.Run(endpoint+"/"+test.name, func(t *testing.T) {
+				settings, dataStore, service := testDependencies(t)
+				settings.RequestTimeout = test.timeout
+				settings.VLLMBaseURL, _ = url.Parse("http://model.example/v1")
+				settings.VLLMModel = "test-model"
+				now := time.Now().Unix()
+				record := store.File{
+					ID: "file_wait", TenantID: store.SharedTenantID, Filename: "notes.txt", MediaType: "text/plain",
+					Purpose: "user_data", Bytes: 5, SHA256: "digest", Status: test.status,
+					SourcePath: "files/shared/file_wait/source.txt", CreatedAt: now, ExpiresAt: now + 3600,
+				}
+				if err := dataStore.Add(context.Background(), record); err != nil {
+					t.Fatal(err)
+				}
+				manifestPath := "files/shared/file_wait/manifest.json"
+				derivedDir := filepath.Join(settings.DataDir, "files/shared/file_wait/derived")
+				if err := os.MkdirAll(derivedDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				manifest := converter.Manifest{
+					SchemaVersion: converter.ManifestSchemaVersion,
+					Documents:     []converter.ManifestDocument{{Name: "notes.txt", Parts: []converter.ManifestPart{{PartNumber: 1, TextPath: "part-0001.txt"}}}},
+				}
+				encoded, err := json.Marshal(manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(settings.DataDir, manifestPath), encoded, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(derivedDir, "part-0001.txt"), []byte("waiting document text"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				content := make([]any, 0)
+				fileIDs := []string{record.ID}
+				if test.name == "multiple_files_timeout" {
+					other := record
+					other.ID = "file_wait_other"
+					if err := dataStore.Add(context.Background(), other); err != nil {
+						t.Fatal(err)
+					}
+					fileIDs = append(fileIDs, other.ID)
+				}
+				for _, id := range fileIDs {
+					if endpoint == "responses" {
+						content = append(content, map[string]any{"type": "input_file", "file_id": id})
+					} else {
+						content = append(content, map[string]any{"type": "file", "file": map[string]any{"file_id": id}})
+					}
+				}
+				payload := map[string]any{"model": "test-model"}
+				items := []any{map[string]any{"role": "user", "content": content}}
+				if endpoint == "responses" {
+					payload["input"] = items
+				} else {
+					payload["messages"] = items
+				}
+				body, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var originalDeadline time.Time
+				upstreamCalled := make(chan struct{}, 1)
+				server := &Server{settings: settings, store: dataStore, files: service}
+				server.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					upstreamCalled <- struct{}{}
+					if deadline, ok := request.Context().Deadline(); ok {
+						t.Errorf("upstream has gateway deadline %v", deadline)
+					}
+					if test.timeout > 0 && time.Until(originalDeadline) >= test.timeout-20*time.Millisecond {
+						t.Error("file wait was not deducted from the upstream time budget")
+					}
+					forwarded, err := io.ReadAll(request.Body)
+					if err != nil || !bytes.Contains(forwarded, []byte("waiting document text")) {
+						t.Errorf("upstream payload = %s, error = %v", forwarded, err)
+					}
+					if test.name == "upstream_timeout" {
+						<-request.Context().Done()
+						return nil, request.Context().Err()
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"response_wait"}`))}, nil
+				})}
+				started := make(chan struct{})
+				handler := server.withRequestTimeout(func(response http.ResponseWriter, request *http.Request) {
+					originalDeadline, _ = request.Context().Deadline()
+					close(started)
+					server.handleInference(response, request, endpoint)
+				})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				request := httptest.NewRequest(http.MethodPost, "/v1/"+endpoint, bytes.NewReader(body)).WithContext(ctx)
+				response := httptest.NewRecorder()
+				finished := make(chan struct{})
+				go func() {
+					defer close(finished)
+					handler(response, request)
+				}()
+				<-started
+				select {
+				case <-finished:
+					t.Fatalf("inference returned before file conversion: %s", response.Body.String())
+				case <-time.After(20 * time.Millisecond):
+				}
+				switch test.name {
+				case "timeout":
+				case "canceled":
+					cancel()
+				case "deleted":
+					if _, err := service.Delete(context.Background(), record.ID, record.TenantID); err != nil {
+						t.Fatal(err)
+					}
+				case "failed":
+					if _, err := dataStore.UpdateStatus(context.Background(), record.ID, "failed", "", "conversion failed"); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					if _, err := dataStore.UpdateStatus(context.Background(), record.ID, "processed", manifestPath, ""); err != nil {
+						t.Fatal(err)
+					}
+				}
+				select {
+				case <-finished:
+				case <-time.After(3 * time.Second):
+					t.Fatal("inference did not finish")
+				}
+				if test.name == "canceled" {
+					if response.Body.Len() != 0 {
+						t.Fatalf("canceled request wrote a response: %s", response.Body.String())
+					}
+				} else if response.Code != test.wantStatus || (test.wantCode != "" && !strings.Contains(response.Body.String(), `"code":"`+test.wantCode+`"`)) {
+					t.Fatalf("response = %d %s, want %d %s", response.Code, response.Body.String(), test.wantStatus, test.wantCode)
+				}
+				wantUpstream := test.wantStatus == 200 || test.name == "upstream_timeout"
+				if got := len(upstreamCalled) != 0; got != wantUpstream {
+					t.Fatalf("upstream called = %t, want %t", got, wantUpstream)
+				}
+			})
+		}
+	}
+}
+
+func TestRequestTimeoutDuringBodyRead(t *testing.T) {
+	for _, endpoint := range []string{"responses", "chat/completions"} {
+		t.Run(endpoint, func(t *testing.T) {
+			settings, dataStore, service := testDependencies(t)
+			settings.RequestTimeout = 50 * time.Millisecond
+			gateway := httptest.NewServer(NewHandler(settings, dataStore, service))
+			defer gateway.Close()
+			connection, err := net.Dial("tcp", gateway.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = connection.Close() }()
+			if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fmt.Fprintf(connection, "POST /v1/%s HTTP/1.1\r\nHost: gateway\r\nContent-Length: 1024\r\nContent-Type: application/json\r\n\r\n{", endpoint); err != nil {
+				t.Fatal(err)
+			}
+			response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = response.Body.Close() }()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusGatewayTimeout || !bytes.Contains(body, []byte(`"code":"request_timeout"`)) {
+				t.Fatalf("response = %d %s, want 504 request_timeout", response.StatusCode, body)
+			}
+		})
+	}
+}
+
+func TestResponseContinuesAfterRequestTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		payload  string
+	}{
+		{name: "responses", endpoint: "/v1/responses", payload: `{"model":"test-model","stream":true,"input":"hello"}`},
+		{name: "chat", endpoint: "/v1/chat/completions", payload: `{"model":"test-model","stream":true,"messages":[{"role":"user","content":"hello"}]}`},
+		{name: "responses_inline", endpoint: "/v1/responses", payload: `{"model":"test-model","stream":true,"input":[{"role":"user","content":[{"type":"input_file","filename":"notes.txt","file_data":"aGVsbG8="}]}]}`},
+		{name: "chat_inline", endpoint: "/v1/chat/completions", payload: `{"model":"test-model","stream":true,"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"notes.txt","file_data":"aGVsbG8="}}]}]}`},
+		{name: "nonstream", endpoint: "/v1/responses", payload: `{"model":"test-model","input":"hello"}`},
+		{name: "nonstream_inline", endpoint: "/v1/responses", payload: `{"model":"test-model","input":[{"role":"user","content":[{"type":"input_file","filename":"notes.txt","file_data":"aGVsbG8="}]}]}`},
+		{name: "passthrough", endpoint: "/v1/embeddings", payload: `{"input":"hello"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			releaseResponse := make(chan struct{})
+			upstreamFinished := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/v1/models" {
+					response.WriteHeader(http.StatusOK)
+					return
+				}
+				defer close(upstreamFinished)
+				response.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(response, "data: {}\n\n")
+				_ = http.NewResponseController(response).Flush()
+				select {
+				case <-releaseResponse:
+					_, _ = io.WriteString(response, "data: [DONE]\n\n")
+				case <-request.Context().Done():
+				}
+			}))
+			defer upstream.Close()
+			settings, dataStore, service := testDependencies(t)
+			settings.RequestTimeout = 200 * time.Millisecond
+			settings.MaxConcurrentRequests = 1
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			settings.VLLMModel = "test-model"
+			gateway := httptest.NewServer(NewHandler(settings, dataStore, service))
+			defer gateway.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, gateway.URL+test.endpoint, strings.NewReader(test.payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			type responseResult struct {
+				status int
+				body   string
+				err    error
+			}
+			finished := make(chan responseResult, 1)
+			responseStarted := make(chan struct{})
+			go func() {
+				client := &http.Client{Timeout: 3 * time.Second}
+				response, err := client.Do(request)
+				if err != nil {
+					finished <- responseResult{err: err}
+					return
+				}
+				defer func() { _ = response.Body.Close() }()
+				close(responseStarted)
+				body, err := io.ReadAll(response.Body)
+				finished <- responseResult{status: response.StatusCode, body: string(body), err: err}
+			}()
+			if strings.Contains(test.payload, `"stream":true`) {
+				select {
+				case <-responseStarted:
+				case <-time.After(3 * time.Second):
+					t.Fatal("stream response headers not received")
+				}
+				client := &http.Client{Timeout: 3 * time.Second}
+				probe, err := client.Get(gateway.URL + "/v1/models")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = probe.Body.Close()
+				if probe.StatusCode != http.StatusOK {
+					t.Fatalf("request during active stream = %d, want 200", probe.StatusCode)
+				}
+			}
+			select {
+			case result := <-finished:
+				t.Fatalf("response stopped before upstream completion: %+v", result)
+			case <-time.After(2 * settings.RequestTimeout):
+			}
+			close(releaseResponse)
+			select {
+			case result := <-finished:
+				if result.err != nil || result.status != http.StatusOK || result.body != "data: {}\n\ndata: [DONE]\n\n" {
+					t.Fatalf("response = %+v, want the complete response", result)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("upstream completion did not finish response forwarding")
+			}
+			select {
+			case <-upstreamFinished:
+			case <-time.After(3 * time.Second):
+				t.Fatal("upstream handler did not finish")
+			}
+		})
+	}
+}
+
+func TestInlinePreparationDeadlinePreventsInference(t *testing.T) {
+	for _, endpoint := range []string{"responses", "chat/completions"} {
+		for _, phase := range []string{"validation", "conversion"} {
+			t.Run(endpoint+"/"+phase, func(t *testing.T) {
+				settings, dataStore, _ := testDependencies(t)
+				settings.RequestTimeout = 50 * time.Millisecond
+				settings.VLLMModel = "test-model"
+				upstreamCalled := make(chan struct{}, 1)
+				upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+					upstreamCalled <- struct{}{}
+					writeJSON(response, http.StatusOK, map[string]any{"id": "unexpected"})
+				}))
+				defer upstream.Close()
+				settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+				convertCalled := make(chan struct{}, 1)
+				registry := converter.Registry{
+					".deadline": func(ctx context.Context, _ converter.ConverterConfig, _ converter.ConverterHandle) (converter.DocumentConverter, error) {
+						return deadlineIgnoringConverter{ctx: ctx, phase: phase, convertCalled: convertCalled}, nil
+					},
+				}
+				service := files.New(settings, dataStore, converter.NewDispatcher(registry, converter.DefaultConverterConfig(), nil))
+				t.Cleanup(service.Stop)
+				gateway := httptest.NewServer(NewHandler(settings, dataStore, service))
+				defer gateway.Close()
+				reference := map[string]any{"filename": "notes.deadline", "file_data": "aGVsbG8="}
+				payload := map[string]any{"model": "test-model"}
+				if endpoint == "responses" {
+					reference["type"] = "input_file"
+					payload["input"] = []any{map[string]any{"role": "user", "content": []any{reference}}}
+				} else {
+					payload["messages"] = []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "file", "file": reference}}}}
+				}
+				encoded, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client := &http.Client{Timeout: 3 * time.Second}
+				response, err := client.Post(gateway.URL+"/v1/"+endpoint, "application/json", bytes.NewReader(encoded))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = response.Body.Close() }()
+				body, err := io.ReadAll(response.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if response.StatusCode != http.StatusGatewayTimeout || !bytes.Contains(body, []byte(`"code":"request_timeout"`)) {
+					t.Fatalf("response = %d %s, want 504 request_timeout", response.StatusCode, body)
+				}
+				if len(upstreamCalled) != 0 {
+					t.Fatal("expired preparation was forwarded upstream")
+				}
+				if got, want := len(convertCalled) != 0, phase == "conversion"; got != want {
+					t.Fatalf("converter called = %t, want %t", got, want)
+				}
+				entries, err := os.ReadDir(filepath.Join(settings.DataDir, "work"))
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("temporary artifacts remained after timeout: %v, %v", entries, err)
+				}
+			})
+		}
+	}
+}
+
+func TestForwardJSONRejectsExpiredPreparation(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	server := &Server{client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Error("expired preparation was forwarded upstream")
+		return nil, errors.New("unexpected upstream call")
+	})}}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	server.forwardJSON(response, request, "responses", map[string]any{"model": "test-model"})
+	if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), `"code":"request_timeout"`) {
+		t.Fatalf("response = %d %s, want 504 request_timeout", response.Code, response.Body.String())
+	}
+}
+
+func TestResponseContextPreservesCallerDeadline(t *testing.T) {
+	callerContext, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	server := &Server{settings: config.Config{RequestTimeout: 20 * time.Millisecond}}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(callerContext)
+	server.withRequestTimeout(func(response http.ResponseWriter, request *http.Request) {
+		upstreamContext, startResponse, cleanup := responseContext(response, request)
+		defer cleanup()
+		if err := startResponse(); err != nil {
+			t.Fatal(err)
+		}
+		gotDeadline, ok := upstreamContext.Deadline()
+		wantDeadline, _ := callerContext.Deadline()
+		if !ok || !gotDeadline.Equal(wantDeadline) {
+			t.Fatalf("upstream deadline = %v, want caller deadline %v", gotDeadline, wantDeadline)
+		}
+		<-request.Context().Done()
+		if err := upstreamContext.Err(); err != nil {
+			t.Fatalf("gateway timeout canceled response context: %v", err)
+		}
+		select {
+		case <-upstreamContext.Done():
+			if !errors.Is(upstreamContext.Err(), context.DeadlineExceeded) {
+				t.Fatalf("upstream error = %v, want caller deadline exceeded", upstreamContext.Err())
+			}
+		case <-time.After(time.Second):
+			t.Fatal("caller deadline did not cancel response context")
+		}
+	})(httptest.NewRecorder(), request)
+}
+
+func TestSlowClientResponseContinuesAfterRequestTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "original", payload: `{"model":"test-model","stream":true,"input":"hello"}`},
+		{name: "expanded", payload: `{"model":"test-model","stream":true,"input":[{"role":"user","content":[{"type":"input_file","filename":"notes.txt","file_data":"aGVsbG8="}]}]}`},
+		{name: "nonstream", payload: `{"model":"test-model","input":"hello"}`},
+		{name: "nonstream_expanded", payload: `{"model":"test-model","input":[{"role":"user","content":[{"type":"input_file","filename":"notes.txt","file_data":"aGVsbG8="}]}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", "text/event-stream")
+				chunk := bytes.Repeat([]byte("x"), 64*1024)
+				for range 1024 {
+					if request.Context().Err() != nil {
+						return
+					}
+					if _, err := response.Write(chunk); err != nil {
+						return
+					}
+				}
+			}))
+			defer upstream.Close()
+			settings, dataStore, service := testDependencies(t)
+			settings.RequestTimeout = 200 * time.Millisecond
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			settings.VLLMModel = "test-model"
+			handler := NewHandler(settings, dataStore, service)
+			finished := make(chan struct{})
+			gateway := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				defer close(finished)
+				handler.ServeHTTP(response, request)
+			}))
+			defer gateway.Close()
+			connection, err := net.DialTCP("tcp", nil, gateway.Listener.Addr().(*net.TCPAddr))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = connection.Close() }()
+			if err := connection.SetReadBuffer(1024); err != nil {
+				t.Fatal(err)
+			}
+			if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now()
+			if _, err := fmt.Fprintf(connection, "POST /v1/responses HTTP/1.1\r\nHost: gateway\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(test.payload), test.payload); err != nil {
+				t.Fatal(err)
+			}
+			response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", response.StatusCode)
+			}
+			select {
+			case <-finished:
+				t.Fatal("response stopped at the gateway deadline")
+			case <-time.After(time.Until(started.Add(2 * settings.RequestTimeout))):
+			}
+			_ = connection.Close()
+			select {
+			case <-finished:
+			case <-time.After(3 * time.Second):
+				t.Fatal("client disconnection did not finish response forwarding")
+			}
+		})
+	}
+}
+
+func TestUpstreamErrorBodyTimeoutReturnsRequestTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		payload  string
+	}{
+		{name: "responses", endpoint: "/v1/responses", payload: `{"model":"test-model","input":"hello"}`},
+		{name: "chat", endpoint: "/v1/chat/completions", payload: `{"model":"test-model","messages":[]}`},
+		{name: "inline", endpoint: "/v1/responses", payload: `{"model":"test-model","input":[{"role":"user","content":[{"type":"input_file","filename":"notes.txt","file_data":"aGVsbG8="}]}]}`},
+		{name: "passthrough", endpoint: "/v1/embeddings", payload: `{"input":"hello"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("X-Upstream-Error", "true")
+				response.WriteHeader(http.StatusBadRequest)
+				_ = http.NewResponseController(response).Flush()
+				<-request.Context().Done()
+			}))
+			defer upstream.Close()
+			settings, dataStore, service := testDependencies(t)
+			settings.RequestTimeout = 100 * time.Millisecond
+			settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+			settings.VLLMModel = "test-model"
+			gateway := httptest.NewServer(NewHandler(settings, dataStore, service))
+			defer gateway.Close()
+			client := &http.Client{Timeout: 3 * time.Second}
+			response, err := client.Post(gateway.URL+test.endpoint, "application/json", strings.NewReader(test.payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = response.Body.Close() }()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusGatewayTimeout || !bytes.Contains(body, []byte(`"code":"request_timeout"`)) {
+				t.Fatalf("response = %d %s, want 504 request_timeout", response.StatusCode, body)
+			}
+			if response.Header.Get("X-Upstream-Error") != "" {
+				t.Fatal("timed-out upstream headers were forwarded")
+			}
+		})
+	}
+}
+
+func TestUpstreamTimeoutReturnsRequestTimeout(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		endpoint string
@@ -1407,8 +2086,8 @@ func TestUpstreamTimeoutReturnsModelTimeout(t *testing.T) {
 			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 				t.Fatal(err)
 			}
-			if result.Error.Code != "model_timeout" {
-				t.Fatalf("error code = %q, want model_timeout", result.Error.Code)
+			if result.Error.Code != "request_timeout" {
+				t.Fatalf("error code = %q, want request_timeout", result.Error.Code)
 			}
 		})
 	}
@@ -1904,28 +2583,56 @@ func TestInferenceWithoutFilePassesThroughRequest(t *testing.T) {
 	}
 }
 
-func TestInferenceWithoutFileIgnoresRequestBodyLimit(t *testing.T) {
-	var receivedBody string
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		body, _ := io.ReadAll(request.Body)
-		receivedBody = string(body)
-		writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
-	}))
-	defer upstream.Close()
-	settings, dataStore, service := testDependencies(t)
-	settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
-	settings.MaxRequestBodyBytes = 1
-	handler := NewHandler(settings, dataStore, service)
-
-	body := `{"model":"any-model","input":"Hello"}`
-	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
-	}
-	if receivedBody != body {
-		t.Fatalf("upstream body = %q, want %q", receivedBody, body)
+func TestInferenceRequestBodyLimit(t *testing.T) {
+	for _, endpoint := range []string{"responses", "chat/completions"} {
+		for _, test := range []struct {
+			name   string
+			body   string
+			limit  int64
+			status int
+		}{
+			{name: "below_limit", body: `{}`, limit: 3, status: http.StatusOK},
+			{name: "exact_limit", body: `{}`, limit: 2, status: http.StatusOK},
+			{name: "over_limit", body: `{}`, limit: 1, status: http.StatusBadRequest},
+			{name: "invalid_json_over_limit", body: `not JSON`, limit: 1, status: http.StatusBadRequest},
+			{name: "invalid_json_within_limit", body: `not JSON`, limit: 8, status: http.StatusOK},
+			{name: "unlimited", body: `{}`, limit: 0, status: http.StatusOK},
+			{name: "stop_reading_early", body: strings.Repeat("a", 1<<20), limit: 16, status: http.StatusBadRequest},
+		} {
+			t.Run(endpoint+"/"+test.name, func(t *testing.T) {
+				var receivedBody string
+				upstreamCalled := false
+				upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+					body, _ := io.ReadAll(request.Body)
+					receivedBody = string(body)
+					upstreamCalled = true
+					writeJSON(response, http.StatusOK, map[string]any{"id": "response_1"})
+				}))
+				defer upstream.Close()
+				settings, dataStore, service := testDependencies(t)
+				settings.VLLMBaseURL, _ = url.Parse(upstream.URL + "/v1")
+				settings.MaxRequestBodyBytes = test.limit
+				handler := NewHandler(settings, dataStore, service)
+				reader := strings.NewReader(test.body)
+				request := httptest.NewRequest(http.MethodPost, "/v1/"+endpoint, reader)
+				request.ContentLength = -1
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if response.Code != test.status {
+					t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+				}
+				if test.status == http.StatusOK {
+					if !upstreamCalled || receivedBody != test.body {
+						t.Fatalf("upstream called = %t, body = %q, want %q", upstreamCalled, receivedBody, test.body)
+					}
+				} else if upstreamCalled || !strings.Contains(response.Body.String(), `"code":"request_too_large"`) {
+					t.Fatalf("upstream called = %t, response = %s", upstreamCalled, response.Body.String())
+				}
+				if test.name == "stop_reading_early" && reader.Len() != len(test.body)-int(test.limit)-1 {
+					t.Fatalf("consumed %d bytes, want %d", len(test.body)-reader.Len(), test.limit+1)
+				}
+			})
+		}
 	}
 }
 
@@ -2191,6 +2898,65 @@ func TestCreateFileRequiresPurposeWithoutSideEffects(t *testing.T) {
 			}
 			if len(entries) != 0 {
 				t.Fatalf("file entries = %v, want none", entries)
+			}
+		})
+	}
+}
+
+func TestWriteErrorType(t *testing.T) {
+	for _, test := range []struct {
+		status int
+		kind   string
+	}{
+		{http.StatusBadRequest, "invalid_request_error"},
+		{http.StatusTooManyRequests, "rate_limit_error"},
+		{http.StatusInternalServerError, "server_error"},
+		{http.StatusBadGateway, "server_error"},
+		{http.StatusGatewayTimeout, "server_error"},
+	} {
+		t.Run(fmt.Sprint(test.status), func(t *testing.T) {
+			response := httptest.NewRecorder()
+			writeError(response, apierror.New(test.status, "test", "test error", ""))
+			if response.Code != test.status || !strings.Contains(response.Body.String(), `"type":"`+test.kind+`"`) {
+				t.Fatalf("response = %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestDocumentPartsRejectsMissingDocuments(t *testing.T) {
+	server := &Server{}
+	if _, err := server.documentParts(resolvedDocument{}, "responses"); err == nil {
+		t.Fatal("manifest without documents accepted")
+	}
+}
+
+func TestCreateFileRejectsOversizedUpload(t *testing.T) {
+	for _, size := range []int{1025, 1024 + (2 << 20)} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			settings, dataStore, service := testDependencies(t)
+			handler := NewHandler(settings, dataStore, service)
+			body := &bytes.Buffer{}
+			form := multipart.NewWriter(body)
+			file, err := form.CreateFormFile("file", "large.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = file.Write(bytes.Repeat([]byte("a"), size))
+			_ = form.WriteField("purpose", "user_data")
+			if err := form.Close(); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+			request.Header.Set("Content-Type", form.FormDataContentType())
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"file_too_large"`) {
+				t.Fatalf("response = %d %s", response.Code, response.Body.String())
+			}
+			paths, err := dataStore.SourcePaths(context.Background())
+			if err != nil || len(paths) != 0 {
+				t.Fatalf("persisted paths = %v, %v; want none", paths, err)
 			}
 		})
 	}

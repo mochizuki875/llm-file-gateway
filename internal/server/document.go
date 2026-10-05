@@ -30,6 +30,9 @@ type resolvedDocument struct {
 // into a converted document. Inline data is written to a temporary directory
 // that is cleaned up after the request completes.
 func (server *Server) prepareDocument(ctx context.Context, reference map[string]any, tenantID, param string, temporary *[]string) (resolvedDocument, error) {
+	if err := ctx.Err(); err != nil {
+		return resolvedDocument{}, err
+	}
 	sources := 0
 	for _, key := range []string{"file_id", "file_data", "file_url"} {
 		if value, ok := reference[key].(string); ok && value != "" {
@@ -69,6 +72,9 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 			filename = override
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return resolvedDocument{}, err
+	}
 	if server.settings.MaxFileBytes > 0 && int64(len(content)) > server.settings.MaxFileBytes {
 		return resolvedDocument{}, apierror.FileTooLarge(server.settings.MaxFileBytes, param)
 	}
@@ -85,13 +91,23 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 	if err != nil {
 		return resolvedDocument{}, err
 	}
-	if err := documentConverter.Validate(source); err != nil {
+	if err := ctx.Err(); err != nil {
+		return resolvedDocument{}, err
+	}
+	validationError := documentConverter.Validate(source)
+	if err := ctx.Err(); err != nil {
+		return resolvedDocument{}, err
+	}
+	if err := validationError; err != nil {
 		return resolvedDocument{}, apierror.New(400, "file_processing_failed", err.Error(), param)
 	}
 	result, err := documentConverter.Convert(ctx, source, filepath.Join(directory, "derived"), converter.Options{
 		MaxPages: server.settings.MaxDocumentPages, MaxTextChars: server.settings.MaxDocumentTextChars,
 		DisableTextExtraction: !server.settings.TextExtractionEnabled,
 	})
+	if err := ctx.Err(); err != nil {
+		return resolvedDocument{}, err
+	}
 	if err != nil {
 		slog.Error("inline document conversion failed", "filename", filepath.Base(filename), "error", err)
 		var pageLimitError *converter.PageLimitError
@@ -124,7 +140,7 @@ func createRequestDirectory(workDir string) (string, error) {
 // (kind="chat"), including extracted text and base64 data URL images.
 func (server *Server) documentParts(document resolvedDocument, kind string) ([]any, error) {
 	if len(document.manifest.Documents) == 0 {
-		return nil, nil
+		return nil, errors.New("document manifest contains no documents")
 	}
 	parts := make([]any, 0)
 	manifestDocument := document.manifest.Documents[0]

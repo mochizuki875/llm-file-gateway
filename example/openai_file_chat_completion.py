@@ -20,20 +20,6 @@ def required_environment(name: str) -> str:
         raise RuntimeError(f"{name} is required")
     return value
 
-
-def wait_until_processed(client: OpenAI, file_id: str) -> None:
-    """Poll the file status until it is processed, fails, or times out."""
-    deadline = time.monotonic() + PROCESSING_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        remote_file = client.files.retrieve(file_id)
-        if remote_file.status == "processed":
-            return
-        if remote_file.status == "error":
-            raise RuntimeError(f"File processing failed: {file_id}")
-        time.sleep(POLL_INTERVAL_SECONDS)
-    raise TimeoutError(f"File processing timed out: {file_id}")
-
-
 def delete_file(client: OpenAI, file_id: str, expires_at: int | None) -> None:
     """Delete an uploaded file, ignoring already-expired or missing files."""
     if expires_at is not None and time.time() >= expires_at:
@@ -70,9 +56,6 @@ def main() -> None:
                 },
             )
         print(f"Uploaded: {uploaded_file.id}")
-
-        wait_until_processed(client, uploaded_file.id)
-        print(f"Processed: {uploaded_file.id}")
 
         completion = client.chat.completions.create(
             model=model,

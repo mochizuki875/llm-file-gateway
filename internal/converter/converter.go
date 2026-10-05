@@ -74,6 +74,9 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 			}
 			pageNumber, width, height := page.PageNumber, page.Width, page.Height
 			imageMediaType := "image/png"
+			if config.ImageFormat == renderer.ImageFormatJPEG {
+				imageMediaType = "image/jpeg"
+			}
 			artifacts = append(artifacts, ManifestPart{
 				PartNumber: index + 1, PageNumber: &pageNumber,
 				TextPath: textPath, ImagePath: &imageName, Width: &width, Height: &height,

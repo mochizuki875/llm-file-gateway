@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/mochizuki875/llm-file-gateway/internal/apierror"
 	"github.com/mochizuki875/llm-file-gateway/internal/logging"
@@ -47,11 +49,13 @@ func (server *Server) passthrough(response http.ResponseWriter, request *http.Re
 // forwardRequest forwards a request body without transforming it. Callers are
 // responsible for authenticating gateway clients before invoking it.
 func (server *Server) forwardRequest(response http.ResponseWriter, request *http.Request, path string, stream, inference bool) {
+	upstreamContext, startResponse, cleanup := responseContext(response, request)
+	defer cleanup()
 	upstreamURL := strings.TrimRight(server.settings.VLLMBaseURL.String(), "/") + "/" + path
 	if request.URL.RawQuery != "" {
 		upstreamURL += "?" + request.URL.RawQuery
 	}
-	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, upstreamURL, request.Body)
+	upstreamRequest, err := http.NewRequestWithContext(upstreamContext, request.Method, upstreamURL, request.Body)
 	if err != nil {
 		slog.Error("upstream request creation failed", "method", request.Method, "path", request.URL.Path, "error", err)
 		writeError(response, apierror.New(500, "internal_error", "Internal server error.", ""))
@@ -65,6 +69,9 @@ func (server *Server) forwardRequest(response http.ResponseWriter, request *http
 	logging.V(request.Context(), 1, "forwarding upstream request", "method", request.Method, "path", request.URL.Path)
 	upstream, err := server.client.Do(upstreamRequest)
 	if err != nil {
+		if contextError := request.Context().Err(); contextError != nil {
+			err = contextError
+		}
 		slog.Error("upstream request failed", "method", request.Method, "path", request.URL.Path, "error", safeHTTPError(err))
 		writeError(response, upstreamError(err))
 		return
@@ -77,9 +84,13 @@ func (server *Server) forwardRequest(response http.ResponseWriter, request *http
 		attributes = []any{"endpoint", path}
 	}
 	upstreamBody := server.logUpstreamErrorResponse(upstream, message, attributes...)
+	if err := startResponse(); err != nil {
+		writeError(response, upstreamError(err))
+		return
+	}
 	copyHeaders(response.Header(), upstream.Header)
 	response.WriteHeader(upstream.StatusCode)
-	if stream {
+	if stream || strings.EqualFold(strings.TrimSpace(strings.SplitN(upstream.Header.Get("Content-Type"), ";", 2)[0]), "text/event-stream") {
 		if _, err := io.Copy(flushWriter{response: response, controller: http.NewResponseController(response)}, upstreamBody); err != nil {
 			slog.Debug("upstream stream copy interrupted", "endpoint", path, "error", err)
 		}
@@ -120,9 +131,15 @@ func copyHeaders(destination, source http.Header) {
 // request is a streaming one.
 func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Request, endpoint string, payload map[string]any) {
 	content, _ := json.Marshal(payload)
+	if err := request.Context().Err(); err != nil {
+		writeAnyError(response, request, err)
+		return
+	}
+	upstreamContext, startResponse, cleanup := responseContext(response, request)
+	defer cleanup()
 
 	upstreamURL := strings.TrimRight(server.settings.VLLMBaseURL.String(), "/") + "/" + endpoint
-	upstreamRequest, _ := http.NewRequestWithContext(request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(content))
+	upstreamRequest, _ := http.NewRequestWithContext(upstreamContext, http.MethodPost, upstreamURL, bytes.NewReader(content))
 	copyHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Del("Authorization")
 	upstreamRequest.Header.Set("Content-Type", "application/json")
@@ -131,12 +148,19 @@ func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Re
 	}
 	upstream, err := server.client.Do(upstreamRequest)
 	if err != nil {
+		if contextError := request.Context().Err(); contextError != nil {
+			err = contextError
+		}
 		slog.Error("upstream inference request failed", "endpoint", endpoint, "error", safeHTTPError(err))
 		writeError(response, upstreamError(err))
 		return
 	}
 	defer func() { _ = upstream.Body.Close() }()
 	upstreamBody := server.logUpstreamErrorResponse(upstream, "upstream inference returned error", "endpoint", endpoint)
+	if err := startResponse(); err != nil {
+		writeError(response, upstreamError(err))
+		return
+	}
 	copyHeaders(response.Header(), upstream.Header)
 	response.WriteHeader(upstream.StatusCode)
 	if stream, _ := payload["stream"].(bool); stream {
@@ -150,14 +174,41 @@ func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Re
 	}
 }
 
+func responseContext(response http.ResponseWriter, request *http.Request) (context.Context, func() error, func()) {
+	clientContext, ok := request.Context().Value(clientContextKey{}).(context.Context)
+	if !ok {
+		clientContext = request.Context()
+	}
+	upstreamContext, cancel := context.WithCancel(clientContext)
+	stopTimeout := context.AfterFunc(request.Context(), cancel)
+	startResponse := func() error {
+		stopTimeout()
+		if err := request.Context().Err(); err != nil {
+			return err
+		}
+		controller := http.NewResponseController(response)
+		deadline := time.Time{}
+		if clientDeadline, ok := clientContext.Deadline(); ok {
+			deadline = clientDeadline
+		}
+		_ = controller.SetReadDeadline(deadline)
+		_ = controller.SetWriteDeadline(deadline)
+		return nil
+	}
+	return upstreamContext, startResponse, func() {
+		stopTimeout()
+		cancel()
+	}
+}
+
 // upstreamError maps an upstream request failure to a gateway error. Timeouts
-// are reported as 504 model_timeout so that clients can distinguish a slow
-// model from an unreachable one; all other failures are 502
+// share the 504 request_timeout status and code with preparation timeouts and
+// are distinguished by the error message; all other failures are 502
 // model_upstream_error.
 func upstreamError(err error) *apierror.Error {
 	var networkError net.Error
 	if errors.As(err, &networkError) && networkError.Timeout() {
-		return apierror.New(504, "model_timeout", "The model request timed out.", "")
+		return apierror.New(504, "request_timeout", "The request to upstream model timeout.", "")
 	}
 	return apierror.New(502, "model_upstream_error", "Unable to reach the model server.", "")
 }

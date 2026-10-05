@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mochizuki875/llm-file-gateway/internal/apierror"
@@ -26,6 +28,7 @@ type Server struct {
 	store    *store.Store
 	files    *files.Service
 	client   *http.Client
+	slots    chan struct{}
 
 	// resolver resolves hostnames for file URL SSRF validation.
 	resolver ipResolver
@@ -42,7 +45,10 @@ type Server struct {
 func NewHandler(settings config.Config, dataStore *store.Store, fileService *files.Service) http.Handler {
 	server := &Server{
 		settings: settings, store: dataStore, files: fileService,
-		client: &http.Client{Timeout: settings.RequestTimeout},
+		client: &http.Client{},
+	}
+	if settings.MaxConcurrentRequests > 0 {
+		server.slots = make(chan struct{}, settings.MaxConcurrentRequests)
 	}
 	server.resolver = net.DefaultResolver
 	server.fileDialer = &publicDialer{
@@ -58,15 +64,77 @@ func NewHandler(settings config.Config, dataStore *store.Store, fileService *fil
 	server.fileDownloadClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
-	mux.HandleFunc("POST /v1/files", server.createFile)
-	mux.HandleFunc("GET /v1/files", server.listFiles)
-	mux.HandleFunc("GET /v1/files/{file_id}", server.retrieveFile)
-	mux.HandleFunc("GET /v1/files/{file_id}/content", server.retrieveContent)
-	mux.HandleFunc("DELETE /v1/files/{file_id}", server.deleteFile)
-	mux.HandleFunc("POST /v1/responses", server.responses)
-	mux.HandleFunc("POST /v1/chat/completions", server.chatCompletions)
-	mux.HandleFunc("/v1/{path...}", server.passthrough)
+	mux.HandleFunc("POST /v1/files", server.withConcurrencyLimit(server.createFile))
+	mux.HandleFunc("GET /v1/files", server.withConcurrencyLimit(server.listFiles))
+	mux.HandleFunc("GET /v1/files/{file_id}", server.withConcurrencyLimit(server.retrieveFile))
+	mux.HandleFunc("GET /v1/files/{file_id}/content", server.withConcurrencyLimit(server.retrieveContent))
+	mux.HandleFunc("DELETE /v1/files/{file_id}", server.withConcurrencyLimit(server.deleteFile))
+	mux.HandleFunc("POST /v1/responses", server.withRequestTimeout(server.withConcurrencyLimit(server.responses)))
+	mux.HandleFunc("POST /v1/chat/completions", server.withRequestTimeout(server.withConcurrencyLimit(server.chatCompletions)))
+	mux.HandleFunc("/v1/{path...}", server.withRequestTimeout(server.withConcurrencyLimit(server.passthrough)))
 	return mux
+}
+
+func (server *Server) withConcurrencyLimit(handler http.HandlerFunc) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		if server.slots == nil {
+			handler(response, request)
+			return
+		}
+		select {
+		case server.slots <- struct{}{}:
+		default:
+			writeError(response, apierror.New(429, "too_many_requests", "The gateway is busy.", ""))
+			return
+		}
+		release := sync.OnceFunc(func() { <-server.slots })
+		defer release()
+		handler(&slotResponseWriter{ResponseWriter: response, release: release}, request)
+	}
+}
+
+type slotResponseWriter struct {
+	http.ResponseWriter
+	release     func()
+	wroteHeader bool
+}
+
+func (response *slotResponseWriter) Unwrap() http.ResponseWriter {
+	return response.ResponseWriter
+}
+
+func (response *slotResponseWriter) WriteHeader(status int) {
+	response.ResponseWriter.WriteHeader(status)
+	if status >= 200 {
+		response.wroteHeader = true
+		response.release()
+	}
+}
+
+func (response *slotResponseWriter) Write(body []byte) (int, error) {
+	if !response.wroteHeader {
+		response.WriteHeader(http.StatusOK)
+	}
+	return response.ResponseWriter.Write(body)
+}
+
+type clientContextKey struct{}
+
+func (server *Server) withRequestTimeout(handler http.HandlerFunc) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		ctx := context.WithValue(request.Context(), clientContextKey{}, request.Context())
+		request = request.WithContext(ctx)
+		if server.settings.RequestTimeout > 0 {
+			ctx, cancel := context.WithTimeout(request.Context(), server.settings.RequestTimeout)
+			defer cancel()
+			request = request.WithContext(ctx)
+		}
+		if deadline, ok := request.Context().Deadline(); ok {
+			controller := http.NewResponseController(response)
+			_ = controller.SetReadDeadline(deadline)
+		}
+		handler(response, request)
+	}
 }
 
 // health reports that the process is running. It does not check connectivity
@@ -98,6 +166,11 @@ func (server *Server) createFile(response http.ResponseWriter, request *http.Req
 	}
 	input, header, err := request.FormFile("file")
 	if err != nil {
+		var sizeError *http.MaxBytesError
+		if errors.As(err, &sizeError) {
+			writeError(response, apierror.FileTooLarge(server.settings.MaxFileBytes, "file"))
+			return
+		}
 		writeError(response, apierror.New(400, "invalid_request", "file is required.", "file"))
 		return
 	}
@@ -331,6 +404,13 @@ func openAIFile(record store.File) map[string]any {
 // writeAnyError writes a gateway error when err is one, otherwise it logs the
 // unexpected error and writes a generic 500 response.
 func writeAnyError(response http.ResponseWriter, request *http.Request, err error) {
+	if errors.Is(request.Context().Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		writeError(response, apierror.New(504, "request_timeout", "Document conversion timeout.", ""))
+		return
+	}
+	if errors.Is(request.Context().Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		return
+	}
 	var gatewayError *apierror.Error
 	if errors.As(err, &gatewayError) {
 		writeError(response, gatewayError)
@@ -349,8 +429,14 @@ func writeError(response http.ResponseWriter, gatewayError *apierror.Error) {
 	if gatewayError.Status >= http.StatusBadRequest && gatewayError.Status < http.StatusInternalServerError {
 		slog.Warn("request rejected", "status", gatewayError.Status, "code", gatewayError.Code, "param", param)
 	}
+	errorType := "invalid_request_error"
+	if gatewayError.Status >= http.StatusInternalServerError {
+		errorType = "server_error"
+	} else if gatewayError.Status == http.StatusTooManyRequests {
+		errorType = "rate_limit_error"
+	}
 	writeJSON(response, gatewayError.Status, map[string]any{"error": map[string]any{
-		"message": gatewayError.Message, "type": "invalid_request_error", "param": param, "code": gatewayError.Code,
+		"message": gatewayError.Message, "type": errorType, "param": param, "code": gatewayError.Code,
 	}})
 }
 

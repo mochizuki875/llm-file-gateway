@@ -31,8 +31,8 @@ func (documentConverter textConverter) Validate(source string) error {
 	return validateExtractedText(source, documentConverter.extract)
 }
 
-func (documentConverter textConverter) Convert(_ context.Context, source, outputDir string, options Options) (Result, error) {
-	return convertExtractedText(source, outputDir, documentConverter.mediaType, documentConverter.extract, options)
+func (documentConverter textConverter) Convert(ctx context.Context, source, outputDir string, options Options) (Result, error) {
+	return convertExtractedText(ctx, source, outputDir, documentConverter.mediaType, documentConverter.extract, options)
 }
 
 // validateExtractedText runs the extractor once to validate that the source
@@ -44,10 +44,21 @@ func validateExtractedText(source string, extract extractor.Extractor) error {
 
 // convertExtractedText extracts text from the source and converts it into a
 // text-only document.
-func convertExtractedText(source, outputDir, mediaType string, extract extractor.Extractor, options Options) (Result, error) {
+func convertExtractedText(ctx context.Context, source, outputDir, mediaType string, extract extractor.Extractor, options Options) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	text, err := extract(source)
+	if contextError := ctx.Err(); contextError != nil {
+		return Result{}, contextError
+	}
 	if err != nil {
 		return Result{}, err
 	}
-	return convertTextDocument(source, outputDir, mediaType, []string{text}, options)
+	result, err := convertTextDocument(source, outputDir, mediaType, []string{text}, options)
+	if contextError := ctx.Err(); contextError != nil {
+		_ = removeConversionOutput(outputDir)
+		return Result{}, contextError
+	}
+	return result, err
 }
