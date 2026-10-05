@@ -35,4 +35,12 @@ services:
       MAX_CONCURRENT_REQUESTS: "${MAX_CONCURRENT_REQUESTS:-0}"
       REQUEST_TIMEOUT_SECONDS: "${REQUEST_TIMEOUT_SECONDS:-300}"
       LOGLEVEL: "${LOGLEVEL:-0}"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8g
+        reservations:
+          cpus: "2"
+          memory: 4g
     restart: unless-stopped
