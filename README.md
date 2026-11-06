@@ -54,7 +54,8 @@ File image conversion uses [document-image-renderer](https://github.com/mochizuk
 | Structured text | `.csv`, `.html`, `.htm` | Converts CSV into row format and extracts visible text from HTML, used as model input |
 | Image | `.jpeg`, `.jpg`, `.png` | Uses the original image as-is as model input |
 
-- Setting `DOCUMENT_TEXT_EXTRACTION_ENABLED=false` disables text extraction from PDF and Office files, sending only the converted images to the model.
+- Every expanded file is sent to the model with filename metadata, regardless of `DOCUMENT_TEXT_EXTRACTION_ENABLED`.
+- Setting `DOCUMENT_TEXT_EXTRACTION_ENABLED=false` disables text extraction from PDF and Office files. The converted images are still sent to the model.
 - PDF/Office pages whose requested pixel count exceeds `DOCUMENT_IMAGE_TARGET_PIXELS` are scaled down before bitmap allocation while preserving their aspect ratio. Scaling may reduce the readability of fine details. Setting the value to `0` disables automatic scaling and target-value validation during file expansion, but the existing hard limits remain active.
 - Macros in Office files are not executed.
 

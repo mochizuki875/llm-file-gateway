@@ -54,7 +54,8 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 | Structured text | `.csv`, `.html`, `.htm` | CSVを行形式に変換、HTMLから可視テキストを抽出し、モデルへの入力として使用 |
 | Image | `.jpeg`, `.jpg`, `.png` | 元形式の画像をそのままモデルへの入力として使用 |
 
-- `DOCUMENT_TEXT_EXTRACTION_ENABLED=false`を設定すると、PDFとOfficeファイルからのテキスト抽出は行わず、変換画像だけをモデルへ送信します。
+- 展開するすべてのファイルは、`DOCUMENT_TEXT_EXTRACTION_ENABLED`に関係なくファイル名metadataとともにモデルへ送信します。
+- `DOCUMENT_TEXT_EXTRACTION_ENABLED=false`を設定すると、PDFとOfficeファイルからのテキスト抽出は行いません。変換画像は引き続きモデルへ送信します。
 - PDF/Officeの描画要求画素数が`DOCUMENT_IMAGE_TARGET_PIXELS`を超えるpageは、アスペクト比を維持したままbitmap確保前に縮小します。縮小によって細部の可読性が低下する場合があります。`0`にすると自動縮小とfile expansion時の目標値検証を無効化しますが、既存のハード上限は引き続き適用します。
 - Officeファイルのマクロは実行しません。
 

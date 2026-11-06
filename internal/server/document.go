@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -150,7 +151,15 @@ func (server *Server) documentParts(document resolvedDocument, kind, param strin
 	if len(document.manifest.Documents) == 0 {
 		return nil, errors.New("document manifest contains no documents")
 	}
-	parts := make([]any, 0)
+	textType := "input_text"
+	if kind == "chat" {
+		textType = "text"
+	}
+	metadata := fmt.Sprintf(`<document_metadata filename="%s"`, html.EscapeString(document.filename))
+	if mediaType := document.manifest.Source.MediaType; mediaType != "" {
+		metadata += fmt.Sprintf(` media_type="%s"`, html.EscapeString(mediaType))
+	}
+	parts := []any{map[string]any{"type": textType, "text": metadata + " />"}}
 	manifestDocument := document.manifest.Documents[0]
 	images := 0
 	var documentPixels uint64
@@ -167,11 +176,7 @@ func (server *Server) documentParts(document resolvedDocument, kind, param strin
 				if artifact.PageNumber != nil {
 					location = fmt.Sprintf("page=\"%d\"", *artifact.PageNumber)
 				}
-				label := fmt.Sprintf("<document filename=\"%s\" %s>\n%s\n</document>", document.filename, location, text)
-				textType := "input_text"
-				if kind == "chat" {
-					textType = "text"
-				}
+				label := fmt.Sprintf("<document filename=\"%s\" %s>\n%s\n</document>", html.EscapeString(document.filename), location, text)
 				parts = append(parts, map[string]any{"type": textType, "text": label})
 			}
 		}
