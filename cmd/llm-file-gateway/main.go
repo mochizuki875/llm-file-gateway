@@ -38,6 +38,7 @@ func run() error {
 		return err
 	}
 	slog.SetDefault(newLogger(os.Stderr, settings.LogVerbosity))
+	warnImageTargetConfiguration(slog.Default(), settings)
 	workDir := filepath.Join(settings.DataDir, "work")
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		return err
@@ -77,6 +78,7 @@ func run() error {
 	converterConfig.MaxPageHeight = settings.MaxDocumentPageHeight
 	converterConfig.MaxPagePixels = settings.MaxDocumentPagePixels
 	converterConfig.MaxDocumentPixels = settings.MaxDocumentPixels
+	converterConfig.TargetPagePixels = settings.DocumentImageTargetPixels
 	converterConfig.MaxOOXMLMembers = settings.MaxDocumentOOXMLMembers
 	converterConfig.MaxOOXMLMemberBytes = settings.MaxDocumentOOXMLMemberBytes
 	converterConfig.MaxOOXMLTotalBytes = settings.MaxDocumentOOXMLTotalBytes
@@ -143,4 +145,13 @@ func newLogger(output io.Writer, verbosity int) *slog.Logger {
 		Level:       logging.Level(verbosity),
 		ReplaceAttr: logging.ReplaceLevel,
 	}))
+}
+
+func warnImageTargetConfiguration(logger *slog.Logger, settings config.Config) {
+	if settings.DocumentImageTargetPixels > 0 && settings.MaxDocumentPagePixels > 0 && settings.DocumentImageTargetPixels > settings.MaxDocumentPagePixels {
+		logger.Warn("document image target exceeds page pixel limit",
+			"target_pixels", settings.DocumentImageTargetPixels,
+			"max_page_pixels", settings.MaxDocumentPagePixels,
+		)
+	}
 }

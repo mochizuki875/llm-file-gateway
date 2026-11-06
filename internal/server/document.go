@@ -5,6 +5,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -104,6 +107,7 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 	result, err := documentConverter.Convert(ctx, source, filepath.Join(directory, "derived"), converter.Options{
 		MaxPages: server.settings.MaxDocumentPages, MaxTextChars: server.settings.MaxDocumentTextChars,
 		DisableTextExtraction: !server.settings.TextExtractionEnabled,
+		Filename:              filepath.Base(filename),
 	})
 	if err := ctx.Err(); err != nil {
 		return resolvedDocument{}, err
@@ -117,6 +121,10 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 		var textLimitError *converter.TextLimitError
 		if errors.As(err, &textLimitError) {
 			return resolvedDocument{}, apierror.New(400, "document_text_too_large", err.Error(), param)
+		}
+		var imageLimitError *converter.ImageLimitError
+		if errors.As(err, &imageLimitError) {
+			return resolvedDocument{}, apierror.New(400, "image_too_large", err.Error(), param)
 		}
 		return resolvedDocument{}, apierror.New(400, "file_processing_failed", err.Error(), param)
 	}
@@ -138,13 +146,15 @@ func createRequestDirectory(workDir string) (string, error) {
 // documentParts converts a resolved document into the content parts expected
 // by the Responses API (kind="responses") or Chat Completions API
 // (kind="chat"), including extracted text and base64 data URL images.
-func (server *Server) documentParts(document resolvedDocument, kind string) ([]any, error) {
+func (server *Server) documentParts(document resolvedDocument, kind, param string) ([]any, error) {
 	if len(document.manifest.Documents) == 0 {
 		return nil, errors.New("document manifest contains no documents")
 	}
 	parts := make([]any, 0)
 	manifestDocument := document.manifest.Documents[0]
 	images := 0
+	var documentPixels uint64
+	validateRenderedImages := isRenderedDocumentMediaType(document.manifest.Source.MediaType)
 	for _, artifact := range manifestDocument.Parts {
 		if artifact.TextPath != "" {
 			text, err := os.ReadFile(filepath.Join(document.derivedDir, artifact.TextPath))
@@ -168,7 +178,18 @@ func (server *Server) documentParts(document resolvedDocument, kind string) ([]a
 		if artifact.ImagePath == nil || (server.settings.MaxDocumentPages > 0 && images >= server.settings.MaxDocumentPages) {
 			continue
 		}
-		image, err := os.ReadFile(filepath.Join(document.derivedDir, *artifact.ImagePath))
+		imagePath := filepath.Join(document.derivedDir, *artifact.ImagePath)
+		if validateRenderedImages {
+			pixels, err := server.validateRenderedImageArtifact(imagePath, artifact, param)
+			if err != nil {
+				return nil, err
+			}
+			if limit := server.settings.MaxDocumentPixels; limit > 0 && (documentPixels > limit || pixels > limit-documentPixels) {
+				return nil, imageTooLarge(limit, param)
+			}
+			documentPixels += pixels
+		}
+		imageContent, err := os.ReadFile(imagePath)
 		if err != nil {
 			slog.Error("document image artifact read failed", "filename", document.filename, "part", artifact.PartNumber, "error", err)
 			return nil, err
@@ -177,7 +198,7 @@ func (server *Server) documentParts(document resolvedDocument, kind string) ([]a
 		if artifact.MediaType != nil {
 			mediaType = *artifact.MediaType
 		}
-		dataURL := "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(image)
+		dataURL := "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(imageContent)
 		if kind == "responses" {
 			parts = append(parts, map[string]any{"type": "input_image", "detail": "auto", "image_url": dataURL})
 		} else {
@@ -186,4 +207,70 @@ func (server *Server) documentParts(document resolvedDocument, kind string) ([]a
 		images++
 	}
 	return parts, nil
+}
+
+func (server *Server) validateRenderedImageArtifact(path string, artifact converter.ManifestPart, param string) (uint64, error) {
+	input, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	imageConfig, format, decodeErr := image.DecodeConfig(input)
+	closeErr := input.Close()
+	if decodeErr != nil {
+		return 0, decodeErr
+	}
+	if closeErr != nil {
+		return 0, closeErr
+	}
+	if imageConfig.Width <= 0 || imageConfig.Height <= 0 {
+		return 0, errors.New("document image artifact has invalid dimensions")
+	}
+	if artifact.Width != nil && *artifact.Width != imageConfig.Width {
+		return 0, errors.New("document image artifact width does not match manifest")
+	}
+	if artifact.Height != nil && *artifact.Height != imageConfig.Height {
+		return 0, errors.New("document image artifact height does not match manifest")
+	}
+	detectedMediaType := "image/" + format
+	if format == "jpeg" {
+		detectedMediaType = "image/jpeg"
+	}
+	if artifact.MediaType != nil && *artifact.MediaType != detectedMediaType {
+		return 0, errors.New("document image artifact media type does not match manifest")
+	}
+	width, height := uint64(imageConfig.Width), uint64(imageConfig.Height)
+	pixels := width * height
+	if limit := server.settings.DocumentImageTargetPixels; limit > 0 && pixels > limit {
+		return 0, imageTooLarge(limit, param)
+	}
+	if limit := server.settings.MaxDocumentPageWidth; limit > 0 && imageConfig.Width > limit {
+		return 0, imageTooLarge(uint64(limit), param)
+	}
+	if limit := server.settings.MaxDocumentPageHeight; limit > 0 && imageConfig.Height > limit {
+		return 0, imageTooLarge(uint64(limit), param)
+	}
+	if limit := server.settings.MaxDocumentPagePixels; limit > 0 && pixels > limit {
+		return 0, imageTooLarge(limit, param)
+	}
+	return pixels, nil
+}
+
+func imageTooLarge(limit uint64, param string) *apierror.Error {
+	return apierror.New(422, "image_too_large", fmt.Sprintf("Image artifact exceeds the configured limit of %d pixels.", limit), param)
+}
+
+func isRenderedDocumentMediaType(mediaType string) bool {
+	switch mediaType {
+	case "application/pdf",
+		"application/msword",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.ms-powerpoint",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/vnd.ms-excel",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/vnd.ms-excel.sheet.macroEnabled.12":
+		return true
+	default:
+		return false
+	}
 }

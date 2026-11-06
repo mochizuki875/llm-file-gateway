@@ -55,6 +55,7 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 | Image | `.jpeg`, `.jpg`, `.png` | 元形式の画像をそのままモデルへの入力として使用 |
 
 - `DOCUMENT_TEXT_EXTRACTION_ENABLED=false`を設定すると、PDFとOfficeファイルからのテキスト抽出は行わず、変換画像だけをモデルへ送信します。
+- PDF/Officeの描画要求画素数が`DOCUMENT_IMAGE_TARGET_PIXELS`を超えるpageは、アスペクト比を維持したままbitmap確保前に縮小します。縮小によって細部の可読性が低下する場合があります。`0`にすると自動縮小とfile expansion時の目標値検証を無効化しますが、既存のハード上限は引き続き適用します。
 - Officeファイルのマクロは実行しません。
 
 ## Requirements
@@ -105,6 +106,7 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 | `MAX_DOCUMENT_PAGE_HEIGHT` | No | `20000` | 描画する1 pageの最大高さ(px)（`0`で無制限） |
 | `MAX_DOCUMENT_PAGE_PIXELS` | No | `200000000` | 描画する1 pageの最大画素数（`0`で無制限） |
 | `MAX_DOCUMENT_PIXELS` | No | `1000000000` | 1 document全体の最大画素数（`0`で無制限） |
+| `DOCUMENT_IMAGE_TARGET_PIXELS` | No | `80000000` | PDF/Officeの各pageをbitmap確保前に縮小する目標画素数（`0`で自動縮小を無効化。直接JPEG/PNG入力には適用しない） |
 | `MAX_DOCUMENT_OOXML_MEMBERS` | No | `10000` | OOXML archiveの最大member数（`0`で無制限） |
 | `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | No | `268435456` (256 MiB) | OOXML archive内の単一memberの最大展開サイズ(bytes)（`0`で無制限） |
 | `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | No | `1073741824` (1 GiB) | OOXML archive全体の最大展開サイズ(bytes)（`0`で無制限） |

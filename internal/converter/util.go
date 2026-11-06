@@ -128,12 +128,12 @@ func removeConversionOutput(outputDir string) error {
 
 // writeResult writes manifest.json next to the output directory and returns
 // the conversion result.
-func writeResult(source, outputDir, mediaType string, artifacts []ManifestPart) (Result, error) {
+func writeResult(source, outputDir, mediaType string, artifacts []ManifestPart, warnings []string) (Result, error) {
 	digest, err := hashFile(source)
 	if err != nil {
 		return Result{}, err
 	}
-	manifest := newManifest(source, mediaType, digest, artifacts)
+	manifest := newManifest(source, mediaType, digest, artifacts, warnings)
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return Result{}, err

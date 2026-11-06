@@ -517,6 +517,7 @@ func TestLoadDocumentResourceLimits(t *testing.T) {
 		{name: "page_height", environment: "MAX_DOCUMENT_PAGE_HEIGHT", defaultValue: 20_000, get: func(settings Config) uint64 { return uint64(settings.MaxDocumentPageHeight) }},
 		{name: "page_pixels", environment: "MAX_DOCUMENT_PAGE_PIXELS", defaultValue: 200_000_000, get: func(settings Config) uint64 { return settings.MaxDocumentPagePixels }},
 		{name: "document_pixels", environment: "MAX_DOCUMENT_PIXELS", defaultValue: 1_000_000_000, get: func(settings Config) uint64 { return settings.MaxDocumentPixels }},
+		{name: "image_target_pixels", environment: "DOCUMENT_IMAGE_TARGET_PIXELS", defaultValue: 80_000_000, get: func(settings Config) uint64 { return settings.DocumentImageTargetPixels }},
 		{name: "ooxml_members", environment: "MAX_DOCUMENT_OOXML_MEMBERS", defaultValue: 10_000, get: func(settings Config) uint64 { return uint64(settings.MaxDocumentOOXMLMembers) }},
 		{name: "ooxml_member_bytes", environment: "MAX_DOCUMENT_OOXML_MEMBER_BYTES", defaultValue: 256 << 20, get: func(settings Config) uint64 { return settings.MaxDocumentOOXMLMemberBytes }},
 		{name: "ooxml_total_bytes", environment: "MAX_DOCUMENT_OOXML_TOTAL_BYTES", defaultValue: 1 << 30, get: func(settings Config) uint64 { return settings.MaxDocumentOOXMLTotalBytes }},

@@ -732,6 +732,7 @@ func (service *Service) convert(ctx context.Context, job conversionJob) error {
 	_, err = documentConverter.Convert(ctx, source, filepath.Join(filepath.Dir(source), "derived"), converter.Options{
 		MaxPages: service.settings.MaxDocumentPages, MaxTextChars: service.settings.MaxDocumentTextChars,
 		DisableTextExtraction: !service.settings.TextExtractionEnabled,
+		FileID:                job.id, Filename: record.Filename,
 	})
 	if err != nil {
 		return fmt.Errorf("document conversion: %w", err)

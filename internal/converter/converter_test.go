@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,8 @@ func TestLimitErrors(t *testing.T) {
 func TestMapRendererError(t *testing.T) {
 	pageLimit := &renderer.PageLimitExceededError{PageCount: 100, MaxPages: 20}
 	characterLimit := &renderer.CharacterLimitExceededError{CharacterCount: 1000, MaxCharacters: 500}
+	pageSizeLimit := &renderer.PageSizeLimitExceededError{PageNumber: 1, Width: 100, Height: 100, Pixels: 10_000, Limit: 5_000, Dimension: "pixels"}
+	documentPixelLimit := &renderer.DocumentPixelLimitExceededError{Pixels: 10_000, MaxPixels: 5_000}
 	for _, test := range []struct {
 		name     string
 		err      error
@@ -42,6 +45,8 @@ func TestMapRendererError(t *testing.T) {
 		{name: "page_limit_zero", err: &renderer.PageLimitExceededError{PageCount: 100, MaxPages: 0}, maxPages: 0, want: &PageLimitError{Limit: 0}},
 		{name: "character_limit", err: characterLimit, maxPages: 20, want: &TextLimitError{Limit: 500}},
 		{name: "wrapped_character_limit", err: fmt.Errorf("extract: %w", characterLimit), maxPages: 20, want: &TextLimitError{Limit: 500}},
+		{name: "page_size_limit", err: pageSizeLimit, maxPages: 20, want: &ImageLimitError{Err: pageSizeLimit}},
+		{name: "document_pixel_limit", err: documentPixelLimit, maxPages: 20, want: &ImageLimitError{Err: documentPixelLimit}},
 		{name: "generic", err: errors.New("boom"), maxPages: 20, want: errors.New("boom")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -63,6 +68,13 @@ func TestMapRendererError(t *testing.T) {
 				var textErr *TextLimitError
 				if !errors.As(got, &textErr) || textErr.Limit != test.want.(*TextLimitError).Limit {
 					t.Fatalf("mapRendererError() = %v, want TextLimitError{Limit:%d}", got, test.want.(*TextLimitError).Limit)
+				}
+				return
+			}
+			if _, ok := test.want.(*ImageLimitError); ok {
+				var imageErr *ImageLimitError
+				if !errors.As(got, &imageErr) || imageErr.Error() != test.want.Error() {
+					t.Fatalf("mapRendererError() = %v, want ImageLimitError %v", got, test.want)
 				}
 				return
 			}
@@ -118,6 +130,32 @@ func TestConvertRenderedDocumentDelegatesCharacterLimit(t *testing.T) {
 	}
 }
 
+func TestLogImageScaledUsesSourceMetadata(t *testing.T) {
+	previousLogger := slog.Default()
+	var output bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	logImageScaled("/data/files/file_example/source.xlsx", Options{
+		FileID: "file_example", Filename: "uploaded-workbook.xlsx",
+	}, ConverterConfig{DPI: 300, TargetPagePixels: 80_000_000}, 1, renderer.RenderedImage{
+		RequestedWidth: 26641, RequestedHeight: 7813, Width: 16515, Height: 4843,
+	})
+
+	logOutput := output.String()
+	for _, expected := range []string{
+		`msg="document image scaled"`, "event=image_scaled", "file_id=file_example",
+		"filename=uploaded-workbook.xlsx", "requested_width=26641", "width=16515",
+	} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("log output = %q, missing %q", logOutput, expected)
+		}
+	}
+	if strings.Contains(logOutput, "filename=source.xlsx") {
+		t.Fatalf("log output contains internal source name: %q", logOutput)
+	}
+}
+
 func TestIsRetryable(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -131,6 +169,8 @@ func TestIsRetryable(t *testing.T) {
 		{name: "wrapped_page_limit", err: fmt.Errorf("document conversion: %w", &PageLimitError{Limit: 20}), want: false},
 		{name: "text_limit", err: &TextLimitError{Limit: 500}, want: false},
 		{name: "wrapped_text_limit", err: fmt.Errorf("document conversion: %w", &TextLimitError{Limit: 500}), want: false},
+		{name: "image_limit", err: &ImageLimitError{Err: errors.New("too large")}, want: false},
+		{name: "wrapped_image_limit", err: fmt.Errorf("document conversion: %w", &ImageLimitError{Err: errors.New("too large")}), want: false},
 		{name: "validation", err: &extractor.ValidationError{Message: "text file must be valid UTF-8"}, want: false},
 		{name: "wrapped_validation", err: fmt.Errorf("document conversion: %w", &extractor.ValidationError{Message: "text file must be valid UTF-8"}), want: false},
 	} {

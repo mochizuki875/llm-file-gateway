@@ -55,6 +55,7 @@ File image conversion uses [document-image-renderer](https://github.com/mochizuk
 | Image | `.jpeg`, `.jpg`, `.png` | Uses the original image as-is as model input |
 
 - Setting `DOCUMENT_TEXT_EXTRACTION_ENABLED=false` disables text extraction from PDF and Office files, sending only the converted images to the model.
+- PDF/Office pages whose requested pixel count exceeds `DOCUMENT_IMAGE_TARGET_PIXELS` are scaled down before bitmap allocation while preserving their aspect ratio. Scaling may reduce the readability of fine details. Setting the value to `0` disables automatic scaling and target-value validation during file expansion, but the existing hard limits remain active.
 - Macros in Office files are not executed.
 
 ## Requirements
@@ -105,6 +106,7 @@ The Gateway reads configuration values from the process environment variables.
 | `MAX_DOCUMENT_PAGE_HEIGHT` | No | `20000` | Maximum height (px) of a rendered page (`0` for unlimited) |
 | `MAX_DOCUMENT_PAGE_PIXELS` | No | `200000000` | Maximum number of pixels of a rendered page (`0` for unlimited) |
 | `MAX_DOCUMENT_PIXELS` | No | `1000000000` | Maximum total number of pixels for an entire document (`0` for unlimited) |
+| `DOCUMENT_IMAGE_TARGET_PIXELS` | No | `80000000` | Target pixel count used to scale each PDF/Office rendered page before bitmap allocation (`0` disables automatic scaling; does not apply to direct JPEG/PNG input) |
 | `MAX_DOCUMENT_OOXML_MEMBERS` | No | `10000` | Maximum number of members in an OOXML archive (`0` for unlimited) |
 | `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | No | `268435456` (256 MiB) | Maximum decompressed size of a single member in an OOXML archive (bytes) (`0` for unlimited) |
 | `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | No | `1073741824` (1 GiB) | Maximum total decompressed size of an OOXML archive (bytes) (`0` for unlimited) |

@@ -282,7 +282,7 @@ func NewInTreeRegistry() Registry {
 ```json
 {
   "schema_version": 1,
-  "converter_version": "2026.09.28",
+  "converter_version": "2026.11.06",
   "source": {
     "media_type": "application/pdf",
     "sha256": "<source SHA-256>"
@@ -304,7 +304,7 @@ func NewInTreeRegistry() Registry {
       ]
     }
   ],
-  "warnings": []
+  "warnings": ["<non-fatal conversion warning>"]
 }
 ```
 
@@ -314,7 +314,8 @@ func NewInTreeRegistry() Registry {
 - manifestとartifactは入力ごとの専用directoryへ出力し、変換失敗時は共通処理が途中のartifactを削除する。
 - 各partの`page_number`、`image_path`、`width`、`height`、`media_type`、`sha256`は画像を持たないtext artifactでは`null`になる。
 - `text_path`はtext抽出を無効にしたrendered artifactでは空文字列になる。
-- `Result.Warnings`と`Manifest.Warnings`は、converterが変換を中断しない警告を返すための拡張ポイントであり、組み込みconverterは現在警告を返さない。`documents`を持たないmanifestは推論展開時に拒否する。
+- `warnings`は、変換を中断しない警告を表す文字列の配列であり、警告がなければ空配列になる。PDF/Officeのpageを縮小した場合、part番号順に、縮小したpartごとに`image_scaled: part=<N> requested_width=<W> requested_height=<H> width=<W2> height=<H2> target_pixels=<T>`形式の要素を1件格納する。
+- `documents`には1件以上のdocumentが必要である。documentを持たないmanifestは推論展開時に拒否する。
 
 ## File Lifecycle
 
@@ -422,7 +423,12 @@ flowchart TD
   Start[DocumentConverter.Convert] --> Implementation{選択済みConverter}
 
   Implementation -->|PDF / Office| PrepareRendered[withOutputDirectory<br/>出力を初期化]
-  PrepareRendered --> Render[renderer.RenderDocument<br/>ページ上限を検証して画像化]
+  PrepareRendered --> RenderStart[renderer.RenderDocument<br/>ページ数を検証し要求寸法を算出]
+  RenderStart --> ScaleCheck{TargetPagePixels > 0<br/>かつ要求画素数が目標超過?}
+  ScaleCheck -->|Yes| ScalePage[アスペクト比を維持<br/>bitmap確保前に縮小]
+  ScaleCheck -->|No| HardLimits[出力寸法へpageの<br/>ハード上限を適用]
+  ScalePage --> HardLimits
+  HardLimits --> Render[bitmapを確保して<br/>画像化]
   Render --> ExtractEnabled{テキスト抽出が有効か}
   ExtractEnabled -->|Yes| Extract[renderer.ExtractDocumentWithOptions<br/>文字数上限を適用]
   ExtractEnabled -->|No| RenderedParts[ManifestPart literal<br/>画像だけのpartを構築]
@@ -459,11 +465,11 @@ flowchart TD
 
 PDFとOfficeは`convertRenderedDocument`で次の順に処理する。
 
-1. `renderer.DefaultRenderOptions`を取得し、DPI、画像形式、timeout、ページ数、PDFサイズ、page寸法・画素数、document総画素数、OOXML展開量の各上限を上書きする。
-2. `renderer.RenderDocument`で各partをPNGへ描画する。
+1. `renderer.DefaultRenderOptions`を取得し、DPI、画像形式、timeout、ページ数、PDFサイズ、page寸法・画素数、document総画素数、OOXML展開量の各上限を上書きする。`DOCUMENT_IMAGE_TARGET_PIXELS`は`TargetPagePixels`として渡す。
+2. `renderer.RenderDocument`で各partをPNGへ描画する。`DOCUMENT_IMAGE_TARGET_PIXELS`（`RenderOptions.TargetPagePixels`）が`0`より大きく、描画要求寸法が`requested_width * requested_height > TargetPagePixels`を満たす場合、rendererはアスペクト比を維持し、bitmap確保前にpageを縮小する。pageのハード上限は縮小後の出力予定寸法へ適用する。
 3. テキスト抽出が有効なら、`renderer.DefaultExtractOptions`へLibreOffice timeoutと文字数上限を設定し、`ExtractDocumentWithOptions`を実行する。
 4. 描画画像と`TextPart`をpart番号で対応付け、各画像と同じstemのtext artifactを生成する。対応する`TextPart`がない画像には空のtext artifactを生成する。
-5. image pathとtext pathを持つ`ManifestPart`を構築し、全partから`manifest.json`を生成する。
+5. image pathとtext pathを持つ`ManifestPart`を構築し、縮小したpartごとに`image_scaled:` warningと`image_scaled`のINFOログを記録して、全partから`manifest.json`を生成する。
 
 描画はテキスト抽出より先に実行する。`RenderDocument`が描画開始前に`MaxPages`を検証するため、ページ数超過時は文書全体のテキストを抽出せず`PageLimitError`で終了できる。ページ数の判定はrendererへ委譲し、Gatewayでは描画後に重ねて検証しない。
 
@@ -479,6 +485,8 @@ PDFはPDFium/WASMで直接処理し、Officeは必要に応じてLibreOfficeで�
 `DOCUMENT_TEXT_EXTRACTION_ENABLED`はデフォルトで`true`とする。`false`の場合は抽出処理を呼ばず、画像だけを持つpartを生成する。
 
 LibreOffice timeoutは`DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS`（デフォルト300秒、`0`で無制限）で設定し、描画とテキスト抽出の両方へ適用する。
+
+rendererの`PageSizeLimitExceededError`と`DocumentPixelLimitExceededError`は、決定的な`ImageLimitError`へ変換し、変換workerでは再試行しない。inlineの`file_data`と`file_url`では`400 image_too_large`を返す。Files APIの変換ではfileをfailed状態にし、後続の`file_id`参照は`422 file_processing_failed`を返す。処理済みのrendered artifactがfile expansion時に現在の上限へ違反した場合、推論リクエストは`422 image_too_large`を返す。
 
 ### Text / Image
 
@@ -500,11 +508,14 @@ LibreOffice timeoutは`DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS`（デフォルト30
 | `MAX_DOCUMENT_PAGE_HEIGHT` | 描画する1 pageの最大高さ | デフォルト20000 px、`0`で無制限 | `RenderOptions.MaxPageHeight`としてrendererへ渡す |
 | `MAX_DOCUMENT_PAGE_PIXELS` | 描画する1 pageの最大画素数 | デフォルト200000000、`0`で無制限 | `RenderOptions.MaxPagePixels`としてrendererへ渡す |
 | `MAX_DOCUMENT_PIXELS` | 1 document全体の最大画素数 | デフォルト1000000000、`0`で無制限 | `RenderOptions.MaxDocumentPixels`としてrendererへ渡す |
+| `DOCUMENT_IMAGE_TARGET_PIXELS` | PDF/Officeの各描画pageの目標画素数 | デフォルト80000000、`0`で縮小を無効化 | `RenderOptions.TargetPagePixels`として渡す。直接JPEG/PNG入力は変更しない |
 | `MAX_DOCUMENT_OOXML_MEMBERS` | OOXML archiveの最大member数 | デフォルト10000、`0`で無制限 | 描画・抽出両方の`MaxOOXMLMembers`へ渡す |
 | `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | OOXML archive内の単一memberの最大展開サイズ | デフォルト256 MiB、`0`で無制限 | 描画・抽出両方の`MaxOOXMLMemberBytes`へ渡す |
 | `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | OOXML archive全体の最大展開サイズ | デフォルト1 GiB、`0`で無制限 | 描画・抽出両方の`MaxOOXMLTotalBytes`へ渡す |
 
 Gatewayはrendererのdefault optionsを起点にし、未設定時はrendererと同じ防御的上限を維持する。運用要件に応じて各上限を環境変数で変更できるが、値を増やすか`0`（無制限）にすると、過大なPDF、画像、OOXML archiveによるCPU・memory・disk消費のリスクが高まる。
+
+`DOCUMENT_IMAGE_TARGET_PIXELS`は縮小の目標値であり、受け入れ可否を決めるハード上限ではない。`TargetPagePixels > MaxPagePixels > 0`の場合、縮小の目標値内でもハード上限で拒否される可能性があるため、起動時にWARNを1回記録するが、起動は中断しない。
 
 ### 出力の一貫性
 
@@ -587,6 +598,8 @@ Responsesの`input_file`、Chat Completionsの`file`をcontent partへ展開す�
 1. 抽出テキストを`<document ...>`で囲んで展開する
 2. 変換画像がある場合は`image_url`にbase64 data URLとして展開する（全artifact合計で`MAX_DOCUMENT_PAGES`、デフォルト50個まで）
 3. 呼び出し元が指定した通常のcontent partをそのまま展開する
+
+PDF/Officeのimage artifactは、全体を読み込む前に画像ヘッダーをdecodeし、実寸とmedia typeがmanifestおよび現在の目標値・ハード上限と一致することを検証する。`DOCUMENT_IMAGE_TARGET_PIXELS=0`ではfile expansion時の目標値検証だけを無効化し、画像ヘッダー、manifest整合性、ハード上限の検証は継続する。直接JPEG/PNGのfile入力には`DOCUMENT_IMAGE_TARGET_PIXELS`と描画document向け画素数上限を適用せず、そのままcopy・展開する。Responsesのネイティブ`input_image`とChat Completionsのネイティブ`image_url`は解釈・変更しない。
 
 ファイルを展開した場合は、ドキュメント内容を信頼できないsource materialとして扱う指示（`documentInstruction`）をResponsesでは`instructions`の先頭へ、Chatでは先頭の`system message`として注入する。
 
@@ -679,6 +692,8 @@ routeは`NewHandler`が`http.ServeMux`へ登録する。`POST /v1/responses`は`
 ## Logging
 
 `log/slog`の構造化text logを標準エラーへ出力する。公開設定`LOGLEVEL`はseverityではなく昇順のverbosityとし、`0`はINFO以上、`1`はDEBUG以上、`2`はqueue操作など高頻度の内部状態も含める。内部ではverbosityごとにslog levelを4ずつ下げてfilterするが、出力時はV1/V2ともlevel名を`DEBUG`へ正規化する。WARNは4xxの入力検証・回復可能な欠落・cleanup・外部URL取得失敗、ERRORはDB、artifact、変換、vLLM通信など処理を完了できない内部・依存障害に使う。4xxログにはHTTP status、error code、paramを含める。ファイル本文、API key、完全な外部URLはfieldへ含めない。
+
+rendered pageを縮小した場合、`event=image_scaled`のINFOログへ元の`filename`、Files API入力では`file_id`、part番号、要求寸法、出力寸法、DPI、目標画素数を記録する。inline入力には`file_id`がない。file展開後の推論リクエストをupstreamへ送る前に、`forwarding upstream request`のDEBUGログへmethod、path、endpointと、requestが参照した`file_id`を順序維持・重複排除した`file_ids`を記録する。`file_data`または`file_url`だけを含むrequestでは`file_ids`を省略し、request payloadとBase64 dataは記録しない。
 
 ## Operational Boundary
 

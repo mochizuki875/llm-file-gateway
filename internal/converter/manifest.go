@@ -6,7 +6,7 @@ const (
 	// ManifestSchemaVersion is the schema version written to manifest.json.
 	ManifestSchemaVersion = 1
 	// ConverterVersion identifies the converter implementation that produced a manifest.
-	ConverterVersion = "2026.09.28"
+	ConverterVersion = "2026.11.06"
 )
 
 // ManifestPart describes a single converted part (text and/or image) of a document.
@@ -43,12 +43,12 @@ type ManifestDocument struct {
 	Parts []ManifestPart `json:"parts"`
 }
 
-func newManifest(source, mediaType, digest string, artifacts []ManifestPart) Manifest {
+func newManifest(source, mediaType, digest string, artifacts []ManifestPart, warnings []string) Manifest {
 	return Manifest{
 		SchemaVersion:    ManifestSchemaVersion,
 		ConverterVersion: ConverterVersion,
 		Source:           ManifestSource{MediaType: mediaType, SHA256: digest},
 		Documents:        []ManifestDocument{{Name: filepath.Base(source), Parts: artifacts}},
-		Warnings:         []string{},
+		Warnings:         warnings,
 	}
 }

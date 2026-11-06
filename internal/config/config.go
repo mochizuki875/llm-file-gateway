@@ -33,6 +33,7 @@ type Config struct {
 	MaxDocumentPageHeight       int
 	MaxDocumentPagePixels       uint64
 	MaxDocumentPixels           uint64
+	DocumentImageTargetPixels   uint64
 	MaxDocumentOOXMLMembers     int
 	MaxDocumentOOXMLMemberBytes uint64
 	MaxDocumentOOXMLTotalBytes  uint64
@@ -115,6 +116,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	documentImageTargetPixels, err := envUint64("DOCUMENT_IMAGE_TARGET_PIXELS", 80_000_000)
+	if err != nil {
+		return Config{}, err
+	}
 	maxOOXMLMembers, err := envInt("MAX_DOCUMENT_OOXML_MEMBERS", 10_000)
 	if err != nil || maxOOXMLMembers < 0 {
 		return Config{}, fmt.Errorf("MAX_DOCUMENT_OOXML_MEMBERS must be a non-negative integer")
@@ -182,6 +187,7 @@ func Load() (Config, error) {
 		MaxDocumentPageHeight:       maxPageHeight,
 		MaxDocumentPagePixels:       maxPagePixels,
 		MaxDocumentPixels:           maxDocumentPixels,
+		DocumentImageTargetPixels:   documentImageTargetPixels,
 		MaxDocumentOOXMLMembers:     maxOOXMLMembers,
 		MaxDocumentOOXMLMemberBytes: maxOOXMLMemberBytes,
 		MaxDocumentOOXMLTotalBytes:  maxOOXMLTotalBytes,

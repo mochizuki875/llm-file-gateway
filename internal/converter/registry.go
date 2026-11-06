@@ -32,6 +32,7 @@ type ConverterConfig struct {
 	MaxPageHeight       int
 	MaxPagePixels       uint64
 	MaxDocumentPixels   uint64
+	TargetPagePixels    uint64
 	MaxOOXMLMembers     int
 	MaxOOXMLMemberBytes uint64
 	MaxOOXMLTotalBytes  uint64
@@ -49,6 +50,7 @@ func DefaultConverterConfig() ConverterConfig {
 		MaxPageHeight:       20_000,
 		MaxPagePixels:       200_000_000,
 		MaxDocumentPixels:   1_000_000_000,
+		TargetPagePixels:    80_000_000,
 		MaxOOXMLMembers:     10_000,
 		MaxOOXMLMemberBytes: 256 << 20,
 		MaxOOXMLTotalBytes:  1 << 30,

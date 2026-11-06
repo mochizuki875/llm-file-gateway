@@ -129,7 +129,7 @@ func copyHeaders(destination, source http.Header) {
 // forwardJSON posts an expanded inference payload to the vLLM endpoint and
 // streams the response back to the client, flushing after each write when the
 // request is a streaming one.
-func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Request, endpoint string, payload map[string]any) {
+func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Request, endpoint string, payload map[string]any, fileIDs []string) {
 	content, _ := json.Marshal(payload)
 	if err := request.Context().Err(); err != nil {
 		writeAnyError(response, request, err)
@@ -146,6 +146,15 @@ func (server *Server) forwardJSON(response http.ResponseWriter, request *http.Re
 	if authorization := server.upstreamAuthorization(); authorization != "" {
 		upstreamRequest.Header.Set("Authorization", authorization)
 	}
+	logAttributes := []any{
+		"method", http.MethodPost,
+		"path", request.URL.Path,
+		"endpoint", endpoint,
+	}
+	if len(fileIDs) > 0 {
+		logAttributes = append(logAttributes, "file_ids", fileIDs)
+	}
+	logging.V(request.Context(), 1, "forwarding upstream request", logAttributes...)
 	upstream, err := server.client.Do(upstreamRequest)
 	if err != nil {
 		if contextError := request.Context().Err(); contextError != nil {

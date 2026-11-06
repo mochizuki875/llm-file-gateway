@@ -282,7 +282,7 @@ Conversion results are stored in `manifest.json` with schema version 1. The sche
 ```json
 {
   "schema_version": 1,
-  "converter_version": "2026.09.28",
+  "converter_version": "2026.11.06",
   "source": {
     "media_type": "application/pdf",
     "sha256": "<source SHA-256>"
@@ -304,7 +304,7 @@ Conversion results are stored in `manifest.json` with schema version 1. The sche
       ]
     }
   ],
-  "warnings": []
+  "warnings": ["<non-fatal conversion warning>"]
 }
 ```
 
@@ -314,7 +314,8 @@ Conversion results are stored in `manifest.json` with schema version 1. The sche
 - The manifest and artifacts are output to a dedicated directory per input; on conversion failure, the shared processing deletes intermediate artifacts.
 - Each part's `page_number`, `image_path`, `width`, `height`, `media_type`, and `sha256` are `null` for text artifacts without images.
 - `text_path` is an empty string for rendered artifacts with text extraction disabled.
-- `Result.Warnings` and `Manifest.Warnings` are extension points for converters to report non-fatal conversion issues; built-in converters currently return no warnings. A manifest without any `documents` is rejected during inference expansion.
+- `warnings` is an array of strings describing non-fatal conversion issues and is empty when there are none. When a PDF/Office page is scaled, it contains one entry per scaled part in the form `image_scaled: part=<N> requested_width=<W> requested_height=<H> width=<W2> height=<H2> target_pixels=<T>`, ordered by part number.
+- `documents` must contain at least one document. A manifest with no documents is rejected during inference expansion.
 
 ## File Lifecycle
 
@@ -421,9 +422,14 @@ The following diagram shows the flow from the selected `DocumentConverter.Conver
 flowchart TD
   Start[DocumentConverter.Convert] --> Implementation{Selected converter}
 
-  Implementation -->|PDF / Office| PrepareRendered[withOutputDirectory<br/>initialize output]
-  PrepareRendered --> Render[renderer.RenderDocument<br/>validate page limit and render images]
-  Render --> ExtractEnabled{Text extraction enabled?}
+  Implementation -->|PDF / Office| PrepareRendered[withOutputDirectory<br/>Initialize output]
+  PrepareRendered --> RenderStart[renderer.RenderDocument<br/>Validate page count and calculate requested dimensions]
+  RenderStart --> ScaleCheck{TargetPagePixels > 0<br/>and requested pixels exceed target?}
+  ScaleCheck -->|Yes| ScalePage[Preserve aspect ratio<br/>Scale before bitmap allocation]
+  ScaleCheck -->|No| HardLimits[Apply page hard limits<br/>to output dimensions]
+  ScalePage --> HardLimits
+  HardLimits --> Render[Allocate bitmap<br/>and render image]
+  Render --> ExtractEnabled{Is text extraction enabled?}
   ExtractEnabled -->|Yes| Extract[renderer.ExtractDocumentWithOptions<br/>apply character limit]
   ExtractEnabled -->|No| RenderedParts[ManifestPart literal<br/>build image-only parts]
   Extract --> Match[ExtractResult.Part<br/>get the TextPart matching the image number]
@@ -459,11 +465,11 @@ flowchart TD
 
 PDF and Office are processed by `convertRenderedDocument` in the following order.
 
-1. Get `renderer.DefaultRenderOptions` and override the limits for DPI, image format, timeout, page count, PDF size, page dimensions/pixels, total document pixels, and OOXML expansion.
-2. Render each part to PNG with `renderer.RenderDocument`.
+1. Get `renderer.DefaultRenderOptions` and override the limits for DPI, image format, timeout, page count, PDF size, page dimensions/pixels, total document pixels, and OOXML expansion. Pass `DOCUMENT_IMAGE_TARGET_PIXELS` as `TargetPagePixels`.
+2. Render each part to PNG with `renderer.RenderDocument`. When `DOCUMENT_IMAGE_TARGET_PIXELS` (`RenderOptions.TargetPagePixels`) is greater than `0` and the requested render dimensions satisfy `requested_width * requested_height > TargetPagePixels`, the renderer preserves the aspect ratio and scales the page before bitmap allocation. Hard page limits are evaluated against the scaled output dimensions.
 3. If text extraction is enabled, set the LibreOffice timeout and character limit in `renderer.DefaultExtractOptions` and run `ExtractDocumentWithOptions`.
 4. Associate rendered images with `TextPart`s by part number and generate text artifacts with the same stem as each image. For images without a corresponding `TextPart`, generate an empty text artifact.
-5. Build `ManifestPart`s with image path and text path, and generate `manifest.json` from all parts.
+5. Build `ManifestPart`s with image path and text path, record an `image_scaled:` warning for each scaled part, emit an `image_scaled` INFO log, and generate `manifest.json` from all parts.
 
 Rendering runs before text extraction. Since `RenderDocument` validates `MaxPages` before rendering starts, when the page count is exceeded it can terminate with `PageLimitError` without extracting the text of the entire document. Page count determination is delegated to the renderer, and the Gateway does not re-validate after rendering.
 
@@ -479,6 +485,8 @@ PDF is processed directly with PDFium/WASM, and Office is temporarily converted 
 `DOCUMENT_TEXT_EXTRACTION_ENABLED` defaults to `true`. When `false`, extraction is not called and parts with images only are generated.
 
 The LibreOffice timeout is set with `DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS` (default 300 seconds, `0` for unlimited) and applies to both rendering and text extraction.
+
+Renderer `PageSizeLimitExceededError` and `DocumentPixelLimitExceededError` values are mapped to the deterministic `ImageLimitError`, which is not retried by conversion workers. For inline `file_data` and `file_url`, this error is returned as `400 image_too_large`. Files API conversion records it as a failed file, and a later `file_id` reference returns `422 file_processing_failed`. If a processed rendered artifact violates the current limits during file expansion, the inference request returns `422 image_too_large`.
 
 ### Text / Image
 
@@ -500,11 +508,14 @@ The LibreOffice timeout is set with `DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS` (defa
 | `MAX_DOCUMENT_PAGE_HEIGHT` | Maximum height of a rendered page | Default 20000 px, `0` for unlimited | Passed to the renderer as `RenderOptions.MaxPageHeight` |
 | `MAX_DOCUMENT_PAGE_PIXELS` | Maximum number of pixels of a rendered page | Default 200000000, `0` for unlimited | Passed to the renderer as `RenderOptions.MaxPagePixels` |
 | `MAX_DOCUMENT_PIXELS` | Maximum total pixels of one document | Default 1000000000, `0` for unlimited | Passed to the renderer as `RenderOptions.MaxDocumentPixels` |
+| `DOCUMENT_IMAGE_TARGET_PIXELS` | Target pixels for each PDF/Office rendered page | Default 80000000, `0` disables scaling | Passed as `RenderOptions.TargetPagePixels`; direct JPEG/PNG input is unchanged |
 | `MAX_DOCUMENT_OOXML_MEMBERS` | Maximum number of members in an OOXML archive | Default 10000, `0` for unlimited | Passed to `MaxOOXMLMembers` for both rendering and extraction |
 | `MAX_DOCUMENT_OOXML_MEMBER_BYTES` | Maximum decompressed size of a single member in an OOXML archive | Default 256 MiB, `0` for unlimited | Passed to `MaxOOXMLMemberBytes` for both rendering and extraction |
 | `MAX_DOCUMENT_OOXML_TOTAL_BYTES` | Maximum total decompressed size of an OOXML archive | Default 1 GiB, `0` for unlimited | Passed to `MaxOOXMLTotalBytes` for both rendering and extraction |
 
 The Gateway starts from the renderer's default options and maintains the same defensive limits as the renderer when unset. Each limit can be changed via environment variables according to operational requirements, but increasing the values or setting `0` (unlimited) increases the risk of CPU, memory, and disk consumption from oversized PDFs, images, and OOXML archives.
+
+`DOCUMENT_IMAGE_TARGET_PIXELS` is a scaling target, not a hard acceptance limit. If `TargetPagePixels > MaxPagePixels > 0`, startup emits one WARN because an image within the scaling target may still be rejected by the hard limit; startup is not aborted.
 
 ### Output Consistency
 
@@ -587,6 +598,8 @@ Responses' `input_file` and Chat Completions' `file` are expanded into content p
 1. Extracted text is expanded wrapped in `<document ...>`
 2. Converted images are expanded as base64 data URLs in `image_url` (up to `MAX_DOCUMENT_PAGES`, default 50, across all artifacts)
 3. Normal content parts specified by the caller are expanded as-is
+
+Before a PDF/Office image artifact is read in full, the Gateway decodes its header and verifies its dimensions and media type against the manifest and the current target/hard limits. `DOCUMENT_IMAGE_TARGET_PIXELS=0` disables only target-value validation during expansion; header, manifest consistency, and hard-limit validation remain active. Direct JPEG/PNG file input is copied and expanded without applying `DOCUMENT_IMAGE_TARGET_PIXELS` or the rendered-document pixel limits. Native Responses `input_image` and Chat Completions `image_url` parts are not interpreted or modified.
 
 When files are expanded, an instruction (`documentInstruction`) treating document content as untrusted source material is injected at the beginning of `instructions` for Responses, and as the first `system message` for Chat.
 
@@ -679,6 +692,8 @@ Routes are registered by `NewHandler` in `http.ServeMux`. `POST /v1/responses` i
 ## Logging
 
 Structured text logs from `log/slog` are output to standard error. The public setting `LOGLEVEL` is an ascending verbosity rather than severity: `0` is INFO and above, `1` is DEBUG and above, and `2` also includes high-frequency internal states such as queue operations. Internally, the slog level is filtered by lowering it by 4 per verbosity level, but at output time the level name is normalized to `DEBUG` for both V1/V2. WARN is used for 4xx input validation, recoverable omissions, cleanup, and external URL fetch failures; ERROR is used for internal and dependency failures that prevent completion, such as DB, artifacts, conversion, and vLLM communication. 4xx logs include the HTTP status, error code, and param. File contents, API keys, and full external URLs are not included in fields.
+
+When a rendered page is scaled, an INFO log with `event=image_scaled` records the original `filename`, the `file_id` for Files API input, part number, requested/output dimensions, DPI, and target pixels. Inline input has no `file_id`. Before an expanded inference request is sent upstream, a DEBUG `forwarding upstream request` log records the method, path, endpoint, and the ordered, deduplicated `file_ids` referenced by the request. The `file_ids` field is omitted for requests containing only `file_data` or `file_url`; request payloads and Base64 data are never logged.
 
 ## Operational Boundary
 

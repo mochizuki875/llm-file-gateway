@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -1308,7 +1310,7 @@ func TestDocumentPartsReportsMissingArtifact(t *testing.T) {
 		}}}}},
 	}
 
-	if _, err := server.documentParts(document, "responses"); err == nil {
+	if _, err := server.documentParts(document, "responses", "input[0].content[0]"); err == nil {
 		t.Fatal("documentParts() succeeded with a missing text artifact")
 	}
 }
@@ -1334,7 +1336,7 @@ func TestDocumentPartsEmitsArtifactTextBeforeImage(t *testing.T) {
 		}}}}},
 	}
 
-	parts, err := server.documentParts(document, "responses")
+	parts, err := server.documentParts(document, "responses", "input[0].content[0]")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1370,7 +1372,7 @@ func TestDocumentPartsOmitsEmptyText(t *testing.T) {
 		}}}}},
 	}
 
-	parts, err := server.documentParts(document, "responses")
+	parts, err := server.documentParts(document, "responses", "input[0].content[0]")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1398,7 +1400,7 @@ func TestDocumentPartsUnlimitedPagesEmitsAllImages(t *testing.T) {
 		}}}},
 	}
 
-	parts, err := server.documentParts(document, "responses")
+	parts, err := server.documentParts(document, "responses", "input[0].content[0]")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1409,6 +1411,126 @@ func TestDocumentPartsUnlimitedPagesEmitsAllImages(t *testing.T) {
 		if part.(map[string]any)["type"] != "input_image" {
 			t.Fatalf("part = %#v, want input_image", part)
 		}
+	}
+}
+
+func TestDocumentPartsRejectsRenderedImageAboveTarget(t *testing.T) {
+	settings, _, _ := testDependencies(t)
+	settings.DocumentImageTargetPixels = 3
+	server := &Server{settings: settings}
+	derivedDir := t.TempDir()
+	imagePath := "page.png"
+	writeTestPNG(t, filepath.Join(derivedDir, imagePath), 2, 2)
+	width, height := 2, 2
+	mediaType := "image/png"
+	document := resolvedDocument{
+		filename:   "document.pdf",
+		derivedDir: derivedDir,
+		manifest: converter.Manifest{
+			Source: converter.ManifestSource{MediaType: "application/pdf"},
+			Documents: []converter.ManifestDocument{{Parts: []converter.ManifestPart{{
+				PartNumber: 1, ImagePath: &imagePath, Width: &width, Height: &height, MediaType: &mediaType,
+			}}}},
+		},
+	}
+
+	_, err := server.documentParts(document, "responses", "input[0].content[0]")
+	var gatewayError *apierror.Error
+	if !errors.As(err, &gatewayError) {
+		t.Fatalf("error = %v, want apierror.Error", err)
+	}
+	if gatewayError.Status != 422 || gatewayError.Code != "image_too_large" || gatewayError.Param != "input[0].content[0]" {
+		t.Fatalf("error = %#v", gatewayError)
+	}
+}
+
+func TestDocumentPartsDoesNotLimitDirectImages(t *testing.T) {
+	settings, _, _ := testDependencies(t)
+	settings.DocumentImageTargetPixels = 1
+	settings.MaxDocumentPagePixels = 1
+	settings.MaxDocumentPixels = 1
+	server := &Server{settings: settings}
+	derivedDir := t.TempDir()
+	imagePath := "image.png"
+	writeTestPNG(t, filepath.Join(derivedDir, imagePath), 2, 2)
+	document := resolvedDocument{
+		filename:   "image.png",
+		derivedDir: derivedDir,
+		manifest: converter.Manifest{
+			Source:    converter.ManifestSource{MediaType: "image/png"},
+			Documents: []converter.ManifestDocument{{Parts: []converter.ManifestPart{{PartNumber: 1, ImagePath: &imagePath}}}},
+		},
+	}
+
+	parts, err := server.documentParts(document, "responses", "input[0].content[0]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 1 || parts[0].(map[string]any)["type"] != "input_image" {
+		t.Fatalf("parts = %#v, want one input_image", parts)
+	}
+}
+
+func TestDocumentPartsRejectsRenderedImageManifestMismatch(t *testing.T) {
+	settings, _, _ := testDependencies(t)
+	server := &Server{settings: settings}
+	derivedDir := t.TempDir()
+	imagePath := "page.png"
+	writeTestPNG(t, filepath.Join(derivedDir, imagePath), 2, 2)
+	wrongWidth := 3
+	document := resolvedDocument{
+		filename:   "document.pdf",
+		derivedDir: derivedDir,
+		manifest: converter.Manifest{
+			Source:    converter.ManifestSource{MediaType: "application/pdf"},
+			Documents: []converter.ManifestDocument{{Parts: []converter.ManifestPart{{PartNumber: 1, ImagePath: &imagePath, Width: &wrongWidth}}}},
+		},
+	}
+
+	if _, err := server.documentParts(document, "responses", "input[0].content[0]"); err == nil || !strings.Contains(err.Error(), "width does not match") {
+		t.Fatalf("error = %v, want manifest width mismatch", err)
+	}
+}
+
+func TestDocumentPartsEnforcesRenderedDocumentPixelLimit(t *testing.T) {
+	settings, _, _ := testDependencies(t)
+	settings.DocumentImageTargetPixels = 0
+	settings.MaxDocumentPixels = 7
+	server := &Server{settings: settings}
+	derivedDir := t.TempDir()
+	imagePath := "page.png"
+	writeTestPNG(t, filepath.Join(derivedDir, imagePath), 2, 2)
+	document := resolvedDocument{
+		filename:   "document.pdf",
+		derivedDir: derivedDir,
+		manifest: converter.Manifest{
+			Source: converter.ManifestSource{MediaType: "application/pdf"},
+			Documents: []converter.ManifestDocument{{Parts: []converter.ManifestPart{
+				{PartNumber: 1, ImagePath: &imagePath},
+				{PartNumber: 2, ImagePath: &imagePath},
+			}}},
+		},
+	}
+
+	_, err := server.documentParts(document, "responses", "input[0].content[0]")
+	var gatewayError *apierror.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Code != "image_too_large" {
+		t.Fatalf("error = %v, want image_too_large", err)
+	}
+}
+
+func writeTestPNG(t *testing.T, path string, width, height int) {
+	t.Helper()
+	output, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(output, image.NewRGBA(image.Rect(0, 0, width, height))); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1892,9 +2014,75 @@ func TestForwardJSONRejectsExpiredPreparation(t *testing.T) {
 	})}}
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
 	response := httptest.NewRecorder()
-	server.forwardJSON(response, request, "responses", map[string]any{"model": "test-model"})
+	server.forwardJSON(response, request, "responses", map[string]any{"model": "test-model"}, nil)
 	if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), `"code":"request_timeout"`) {
 		t.Fatalf("response = %d %s, want 504 request_timeout", response.Code, response.Body.String())
+	}
+}
+
+func TestFileReferenceIDs(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		payload  map[string]any
+	}{
+		{
+			name: "responses", endpoint: "responses",
+			payload: map[string]any{"input": []any{map[string]any{"content": []any{
+				map[string]any{"type": "input_file", "file_id": "file_a"},
+				map[string]any{"type": "input_file", "file_data": "inline"},
+				map[string]any{"type": "input_file", "file_id": "file_a"},
+				map[string]any{"type": "input_file", "file_id": "file_b"},
+			}}}},
+		},
+		{
+			name: "chat", endpoint: "chat/completions",
+			payload: map[string]any{"messages": []any{map[string]any{"content": []any{
+				map[string]any{"type": "file", "file": map[string]any{"file_id": "file_a"}},
+				map[string]any{"type": "file", "file": map[string]any{"file_data": "inline"}},
+				map[string]any{"type": "file", "file": map[string]any{"file_id": "file_b"}},
+			}}}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := strings.Join(fileReferenceIDs(test.endpoint, test.payload), ","); got != "file_a,file_b" {
+				t.Fatalf("fileReferenceIDs() = %q, want %q", got, "file_a,file_b")
+			}
+		})
+	}
+}
+
+func TestForwardJSONLogsUpstreamRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{}`)
+	}))
+	defer upstream.Close()
+	baseURL, err := url.Parse(upstream.URL + "/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{settings: config.Config{VLLMBaseURL: baseURL}, client: upstream.Client()}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	response := httptest.NewRecorder()
+
+	previousLogger := slog.Default()
+	var output bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	server.forwardJSON(response, request, "responses", map[string]any{"model": "secret-model-value"}, []string{"file_example"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	logOutput := output.String()
+	for _, expected := range []string{`msg="forwarding upstream request"`, "method=POST", "path=/v1/responses", "endpoint=responses", "file_ids=[file_example]"} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("log output = %q, missing %q", logOutput, expected)
+		}
+	}
+	if strings.Contains(logOutput, "secret-model-value") {
+		t.Fatalf("log output contains request payload: %q", logOutput)
 	}
 }
 
@@ -2926,7 +3114,7 @@ func TestWriteErrorType(t *testing.T) {
 
 func TestDocumentPartsRejectsMissingDocuments(t *testing.T) {
 	server := &Server{}
-	if _, err := server.documentParts(resolvedDocument{}, "responses"); err == nil {
+	if _, err := server.documentParts(resolvedDocument{}, "responses", "input[0].content[0]"); err == nil {
 		t.Fatal("manifest without documents accepted")
 	}
 }

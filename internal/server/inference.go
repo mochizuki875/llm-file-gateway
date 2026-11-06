@@ -87,6 +87,7 @@ func (server *Server) handleInference(response http.ResponseWriter, request *htt
 		writeError(response, apierror.New(404, "model_not_found", "The requested model is not available.", "model"))
 		return
 	}
+	fileIDs := fileReferenceIDs(endpoint, payload)
 	temporary := make([]string, 0)
 	defer func() {
 		for _, directory := range temporary {
@@ -121,7 +122,7 @@ func (server *Server) handleInference(response http.ResponseWriter, request *htt
 		writeAnyError(response, request, err)
 		return
 	}
-	server.forwardJSON(response, request, endpoint, payload)
+	server.forwardJSON(response, request, endpoint, payload, fileIDs)
 }
 
 // hasFileReference reports whether a payload contains a file part the gateway
@@ -153,6 +154,52 @@ func hasFileReference(endpoint string, payload map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// fileReferenceIDs returns the file IDs referenced by an inference request in
+// first-seen order. Duplicate references are included only once.
+func fileReferenceIDs(endpoint string, payload map[string]any) []string {
+	var items []any
+	if endpoint == "responses" {
+		items, _ = payload["input"].([]any)
+	} else {
+		items, _ = payload["messages"].([]any)
+	}
+	seen := make(map[string]bool)
+	fileIDs := make([]string, 0)
+	for _, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := item["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawPart := range content {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			reference := part
+			if endpoint == "responses" {
+				if part["type"] != "input_file" {
+					continue
+				}
+			} else {
+				if part["type"] != "file" {
+					continue
+				}
+				reference, _ = part["file"].(map[string]any)
+			}
+			fileID, _ := reference["file_id"].(string)
+			if fileID != "" && !seen[fileID] {
+				seen[fileID] = true
+				fileIDs = append(fileIDs, fileID)
+			}
+		}
+	}
+	return fileIDs
 }
 
 // expandResponses replaces input_file parts in a Responses API payload with
@@ -192,11 +239,15 @@ func (server *Server) expandResponses(ctx context.Context, payload map[string]an
 			if err != nil {
 				return false, err
 			}
-			documentParts, err := server.documentParts(document, "responses")
+			documentParts, err := server.documentParts(document, "responses", param)
 			if document.release != nil {
 				document.release()
 			}
 			if err != nil {
+				var gatewayError *apierror.Error
+				if errors.As(err, &gatewayError) {
+					return false, gatewayError
+				}
 				return false, apierror.New(422, "file_processing_failed", "Document artifacts are missing or unreadable.", param)
 			}
 			expanded = append(expanded, documentParts...)
@@ -245,11 +296,15 @@ func (server *Server) expandChat(ctx context.Context, payload map[string]any, te
 			if err != nil {
 				return false, err
 			}
-			documentParts, err := server.documentParts(document, "chat")
+			documentParts, err := server.documentParts(document, "chat", param)
 			if document.release != nil {
 				document.release()
 			}
 			if err != nil {
+				var gatewayError *apierror.Error
+				if errors.As(err, &gatewayError) {
+					return false, gatewayError
+				}
 				return false, apierror.New(422, "file_processing_failed", "Document artifacts are missing or unreadable.", param)
 			}
 			expanded = append(expanded, documentParts...)

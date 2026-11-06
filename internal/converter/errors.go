@@ -25,6 +25,14 @@ func (err *TextLimitError) Error() string {
 	return fmt.Sprintf("document exceeds the %d-character text limit", err.Limit)
 }
 
+// ImageLimitError reports a deterministic renderer image limit violation.
+type ImageLimitError struct {
+	Err error
+}
+
+func (err *ImageLimitError) Error() string { return err.Err.Error() }
+func (err *ImageLimitError) Unwrap() error { return err.Err }
+
 // IsRetryable reports whether a conversion error may succeed when retried
 // with the same input. Deterministic errors such as page/text limit
 // violations and input validation failures are not retryable.
@@ -35,6 +43,10 @@ func IsRetryable(err error) bool {
 	}
 	var textLimitError *TextLimitError
 	if errors.As(err, &textLimitError) {
+		return false
+	}
+	var imageLimitError *ImageLimitError
+	if errors.As(err, &imageLimitError) {
 		return false
 	}
 	var validationError *extractor.ValidationError

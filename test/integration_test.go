@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"image"
 	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -383,6 +384,68 @@ func TestOfficePluginSampleConversion(t *testing.T) {
 			for _, artifact := range result.Artifacts {
 				if artifact.TextPath == "" {
 					t.Fatalf("Office image artifact has no corresponding text: %#v", artifact)
+				}
+			}
+		})
+	}
+}
+
+func TestLargeWorkbookRegression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("LibreOffice rendering is an integration test")
+	}
+	for _, name := range []string{
+		"repro-vllm-image-pixel-limit.xlsx",
+		"repro-pdfium-bitmap-too-large.xlsx",
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := filepath.Join("..", "example", name)
+			_, err := os.Stat(source)
+			if os.IsNotExist(err) {
+				t.Skipf("external reproduction asset is not available: %s", source)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			output := filepath.Join(t.TempDir(), "derived")
+			result, err := convertSample(t, source, output, converter.Options{MaxPages: 20, DisableTextExtraction: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Artifacts) != 3 {
+				t.Fatalf("artifacts = %d, want 3", len(result.Artifacts))
+			}
+			for _, artifact := range result.Artifacts {
+				if artifact.ImagePath == nil || artifact.Width == nil || artifact.Height == nil {
+					t.Fatalf("image artifact lacks dimensions: %#v", artifact)
+				}
+				pixels := uint64(*artifact.Width) * uint64(*artifact.Height)
+				if pixels > 80_000_000 {
+					t.Fatalf("artifact pixels = %d, want <= 80000000", pixels)
+				}
+				imageFile, err := os.Open(filepath.Join(output, *artifact.ImagePath))
+				if err != nil {
+					t.Fatal(err)
+				}
+				actualConfig, _, decodeErr := image.DecodeConfig(imageFile)
+				closeErr := imageFile.Close()
+				if decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				if closeErr != nil {
+					t.Fatal(closeErr)
+				}
+				if actualConfig.Width != *artifact.Width || actualConfig.Height != *artifact.Height {
+					t.Fatalf("decoded dimensions = %dx%d, manifest = %dx%d", actualConfig.Width, actualConfig.Height, *artifact.Width, *artifact.Height)
+				}
+			}
+			if len(result.Warnings) != 3 {
+				t.Fatalf("warnings = %v, want 3 image_scaled warnings", result.Warnings)
+			}
+			for _, warning := range result.Warnings {
+				if !strings.HasPrefix(warning, "image_scaled:") {
+					t.Fatalf("warning = %q, want image_scaled warning", warning)
 				}
 			}
 		})

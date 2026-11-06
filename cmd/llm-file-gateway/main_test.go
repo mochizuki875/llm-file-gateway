@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mochizuki875/llm-file-gateway/internal/config"
 	"github.com/mochizuki875/llm-file-gateway/internal/logging"
 )
 
@@ -52,6 +53,20 @@ func TestNewLoggerNormalizesVerboseLevelName(t *testing.T) {
 
 	if !strings.Contains(output.String(), "level=DEBUG") || strings.Contains(output.String(), "level=DEBUG-4") {
 		t.Fatalf("log output = %q, want level=DEBUG without slog level offset", output.String())
+	}
+}
+
+func TestWarnImageTargetConfiguration(t *testing.T) {
+	var output bytes.Buffer
+	logger := newLogger(&output, 0)
+	warnImageTargetConfiguration(logger, config.Config{DocumentImageTargetPixels: 101, MaxDocumentPagePixels: 100})
+	if !strings.Contains(output.String(), "document image target exceeds page pixel limit") {
+		t.Fatalf("warning output = %q", output.String())
+	}
+	output.Reset()
+	warnImageTargetConfiguration(logger, config.Config{DocumentImageTargetPixels: 100, MaxDocumentPagePixels: 100})
+	if output.Len() != 0 {
+		t.Fatalf("unexpected warning output = %q", output.String())
 	}
 }
 
@@ -157,6 +172,7 @@ func clearGatewayEnv(t *testing.T) {
 		"FILE_TTL_SECONDS", "MAX_FILE_BYTES", "MAX_REQUEST_BODY_BYTES", "MAX_DOCUMENT_PAGES",
 		"MAX_DOCUMENT_TEXT_CHARS", "MAX_DOCUMENT_PDF_BYTES", "MAX_DOCUMENT_PAGE_WIDTH",
 		"MAX_DOCUMENT_PAGE_HEIGHT", "MAX_DOCUMENT_PAGE_PIXELS", "MAX_DOCUMENT_PIXELS",
+		"DOCUMENT_IMAGE_TARGET_PIXELS",
 		"MAX_DOCUMENT_OOXML_MEMBERS", "MAX_DOCUMENT_OOXML_MEMBER_BYTES", "MAX_DOCUMENT_OOXML_TOTAL_BYTES",
 		"DOCUMENT_DPI", "DOCUMENT_RENDER_TIMEOUT_SECONDS", "DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS",
 		"DOCUMENT_TEXT_EXTRACTION_ENABLED", "CONVERSION_WORKERS", "CONVERSION_QUEUE_CAPACITY",

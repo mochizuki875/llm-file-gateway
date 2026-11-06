@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 		renderOptions.MaxPageHeight = config.MaxPageHeight
 		renderOptions.MaxPagePixels = config.MaxPagePixels
 		renderOptions.MaxDocumentPixels = config.MaxDocumentPixels
+		renderOptions.TargetPagePixels = config.TargetPagePixels
 		renderOptions.MaxOOXMLMembers = config.MaxOOXMLMembers
 		renderOptions.MaxOOXMLMemberBytes = config.MaxOOXMLMemberBytes
 		renderOptions.MaxOOXMLTotalBytes = config.MaxOOXMLTotalBytes
@@ -55,6 +57,7 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 			}
 		}
 		artifacts := make([]ManifestPart, 0, len(rendered.Images))
+		warnings := make([]string, 0)
 		for index, page := range rendered.Images {
 			imageName := filepath.Base(page.Path)
 			textPath := ""
@@ -82,9 +85,38 @@ func convertRenderedDocument(ctx context.Context, source, outputDir, mediaType s
 				TextPath: textPath, ImagePath: &imageName, Width: &width, Height: &height,
 				MediaType: &imageMediaType, SHA256: &digest,
 			})
+			if page.Scaled {
+				warning := fmt.Sprintf("image_scaled: part=%d requested_width=%d requested_height=%d width=%d height=%d target_pixels=%d", index+1, page.RequestedWidth, page.RequestedHeight, page.Width, page.Height, config.TargetPagePixels)
+				warnings = append(warnings, warning)
+				logImageScaled(source, options, config, index+1, page)
+			}
 		}
-		return writeResult(source, outputDir, mediaType, artifacts)
+		return writeResult(source, outputDir, mediaType, artifacts, warnings)
 	})
+}
+
+func logImageScaled(source string, options Options, config ConverterConfig, part int, image renderer.RenderedImage) {
+	filename := options.Filename
+	if filename == "" {
+		filename = filepath.Base(source)
+	}
+	attributes := []any{
+		"event", "image_scaled",
+		"filename", filename,
+	}
+	if options.FileID != "" {
+		attributes = append(attributes, "file_id", options.FileID)
+	}
+	attributes = append(attributes,
+		"part", part,
+		"requested_width", image.RequestedWidth,
+		"requested_height", image.RequestedHeight,
+		"width", image.Width,
+		"height", image.Height,
+		"dpi", config.DPI,
+		"target_pixels", config.TargetPagePixels,
+	)
+	slog.Info("document image scaled", attributes...)
 }
 
 // mapRendererError converts renderer errors into converter errors. In
@@ -100,6 +132,14 @@ func mapRendererError(err error, maxPages int) error {
 	var characterLimitError *renderer.CharacterLimitExceededError
 	if errors.As(err, &characterLimitError) {
 		return &TextLimitError{Limit: characterLimitError.MaxCharacters}
+	}
+	var pageSizeLimitError *renderer.PageSizeLimitExceededError
+	if errors.As(err, &pageSizeLimitError) {
+		return &ImageLimitError{Err: pageSizeLimitError}
+	}
+	var documentPixelLimitError *renderer.DocumentPixelLimitExceededError
+	if errors.As(err, &documentPixelLimitError) {
+		return &ImageLimitError{Err: documentPixelLimitError}
 	}
 	return err
 }
@@ -119,7 +159,7 @@ func convertTextDocument(source, outputDir, mediaType string, textBlocks []strin
 			}
 			artifacts = append(artifacts, ManifestPart{PartNumber: index + 1, TextPath: name})
 		}
-		return writeResult(source, outputDir, mediaType, artifacts)
+		return writeResult(source, outputDir, mediaType, artifacts, []string{})
 	})
 }
 
@@ -142,6 +182,6 @@ func convertImageDocument(source, outputDir, mediaType string, width, height int
 			PartNumber: 1, TextPath: "part-0001.txt", ImagePath: &imageName,
 			Width: &width, Height: &height, MediaType: &mediaType, SHA256: &digest,
 		}
-		return writeResult(source, outputDir, mediaType, []ManifestPart{artifact})
+		return writeResult(source, outputDir, mediaType, []ManifestPart{artifact}, []string{})
 	})
 }

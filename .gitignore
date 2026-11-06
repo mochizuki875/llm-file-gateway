@@ -1,6 +1,7 @@
 /.env
 .venv/
 /gateway-data/
+/bug_report/
 /llm-file-gateway
 *.out
 *.test
