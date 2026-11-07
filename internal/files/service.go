@@ -435,11 +435,11 @@ func (service *Service) Resolve(ctx context.Context, id, tenantID, param string)
 	return record, manifest, release, nil
 }
 
-// OpenSource opens the original uploaded file for reading while holding a
+// OpenFile opens the original uploaded file for reading while holding a
 // read lease, so that Delete and the janitor wait until the caller is done
 // before removing the on-disk directory. The caller must close the returned
 // file and call the release function exactly once.
-func (service *Service) OpenSource(ctx context.Context, id, tenantID string) (*store.File, *os.File, func(), error) {
+func (service *Service) OpenFile(ctx context.Context, id, tenantID string) (*store.File, *os.File, func(), error) {
 	record, err := service.store.Get(ctx, id, tenantID)
 	if err != nil {
 		return nil, nil, nil, err

@@ -303,7 +303,7 @@ func (server *Server) retrieveContent(response http.ResponseWriter, request *htt
 		return
 	}
 	id := request.PathValue("file_id")
-	record, input, release, err := server.files.OpenSource(request.Context(), id, tenantID)
+	record, input, release, err := server.files.OpenFile(request.Context(), id, tenantID)
 	if err != nil {
 		writeAnyError(response, request, err)
 		return
