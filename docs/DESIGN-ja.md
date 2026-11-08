@@ -385,6 +385,8 @@ GATEWAY_DATA_DIR/
 
 - 永続file directory、request temporary directory、derived directoryは`0700`、source、derived artifact、manifestは`0600`で新規作成する。
 - 停止時は共通contextをcancelし、すべてのgoroutineの終了を待つ。
+- コンテナイメージは`/usr/bin/tini -s --`を経由して`/usr/local/bin/llm-file-gateway`を起動する。通常はTiniがPID 1として動作し、`SIGINT` / `SIGTERM`をGatewayへ転送し、Gatewayの終了statusを返し、孤児化した子孫processを回収する。`-s`は、process namespaceを共有するPodなどでTiniがPID 1ではない場合にも、Tiniをchild subreaperとして登録する。
+- Gatewayはservice contextとfileごとのcontextを所有する。ファイル削除、期限切れ削除、service停止は対象contextをcancelし、変換が戻るまで待つ。`document-image-renderer`はLibreOfficeの変換ごとのprocess groupを所有し、timeoutまたはcancellation時に対象groupを終了する。
 
 ```mermaid
 sequenceDiagram

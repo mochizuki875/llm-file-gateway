@@ -184,8 +184,10 @@ func TestGatewayEndToEndTextFile(t *testing.T) {
 
 	items := received["input"].([]any)
 	content := items[0].(map[string]any)["content"].([]any)
-	first := content[0].(map[string]any)
-	if first["type"] != "input_text" || !strings.Contains(first["text"].(string), "integration test content") {
+	metadata := content[0].(map[string]any)
+	text := content[1].(map[string]any)
+	if metadata["type"] != "input_text" || !strings.Contains(metadata["text"].(string), `filename="notes.txt"`) ||
+		text["type"] != "input_text" || !strings.Contains(text["text"].(string), "integration test content") {
 		t.Fatalf("expanded content = %#v", content)
 	}
 }

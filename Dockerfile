@@ -34,6 +34,7 @@ RUN apt-get update \
         libreoffice-calc \
         libreoffice-impress \
         libreoffice-writer \
+        tini \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .devcontainer/fonts.conf /etc/fonts/local.conf
@@ -53,4 +54,4 @@ ENV HOME=/home/gateway \
 WORKDIR /home/gateway
 EXPOSE 8080
 
-ENTRYPOINT ["llm-file-gateway"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/llm-file-gateway"]

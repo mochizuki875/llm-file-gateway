@@ -161,6 +161,8 @@ The published port can be changed as in `GATEWAY_DOCKER_PORT=18080 docker compos
 
 Compose makes the Gateway in the container listen on `0.0.0.0:8080` and passes the `.env` in the current directory expanded into the container. Since volumes for persisting stored data are not included in the default Compose configuration, SQLite and stored files are lost when the container is removed.
 
+The image starts the Gateway through Tini. Tini runs as PID 1, forwards termination signals to the Gateway, and reaps orphaned descendant processes created during Office conversion.
+
 ```bash
 docker compose up --build -d
 docker compose ps

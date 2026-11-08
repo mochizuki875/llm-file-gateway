@@ -385,6 +385,8 @@ GATEWAY_DATA_DIR/
 
 - Persistent file directories, request temporary directories, and derived directories are created with `0700`; source, derived artifacts, and manifests are created with `0600`.
 - On shutdown, the shared context is canceled and all goroutines are awaited.
+- The container image starts `/usr/local/bin/llm-file-gateway` through `/usr/bin/tini -s --`. Tini normally runs as PID 1, forwards `SIGINT` / `SIGTERM` to the Gateway, returns the Gateway exit status, and reaps orphaned descendants. The `-s` option also registers Tini as a child subreaper when it is not PID 1, such as in a Pod with a shared process namespace.
+- The Gateway owns service and per-file contexts. File deletion, expiration, and service shutdown cancel the relevant contexts and wait for conversion to return. `document-image-renderer` owns each LibreOffice process group and terminates that group on timeout or cancellation.
 
 ```mermaid
 sequenceDiagram

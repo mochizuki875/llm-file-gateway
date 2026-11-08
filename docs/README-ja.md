@@ -161,6 +161,8 @@ curl -sS --fail http://localhost:8080/v1/models \
 
 Composeはコンテナ内のGatewayを`0.0.0.0:8080`で待ち受けさせ、カレントディレクトリの`.env`を展開してコンテナへ渡します。保存データを永続化するvolumeはデフォルトのCompose構成に含まれないため、コンテナを削除するとSQLiteと保存ファイルも失われます。
 
+イメージはTiniを経由してGatewayを起動します。TiniはPID 1として動作し、終了signalをGatewayへ転送し、Office変換中に孤児化した子孫processを回収します。
+
 ```bash
 docker compose up --build -d
 docker compose ps
