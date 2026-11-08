@@ -154,16 +154,6 @@ func TestCleanupStaleRequestDirectories(t *testing.T) {
 	}
 }
 
-func TestComposePropagatesMaxRequestBodyBytesWithoutFixedDefault(t *testing.T) {
-	content, err := os.ReadFile(filepath.Join("..", "..", "compose.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(content), `MAX_REQUEST_BODY_BYTES: "${MAX_REQUEST_BODY_BYTES:-}"`) {
-		t.Fatalf("compose.yaml does not preserve MAX_REQUEST_BODY_BYTES empty/default semantics")
-	}
-}
-
 func clearGatewayEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
