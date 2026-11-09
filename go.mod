@@ -3,7 +3,7 @@ module github.com/mochizuki875/llm-file-gateway
 go 1.27.3
 
 require (
-	github.com/mochizuki875/document-image-renderer v0.4.0
+	github.com/mochizuki875/document-image-renderer v0.4.1
 	golang.org/x/net v0.62.0
 	modernc.org/sqlite v1.59.0
 )
