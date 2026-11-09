@@ -124,6 +124,7 @@ Gatewayは設定値をプロセスの環境変数から読み取ります。
 - `GATEWAY_AUTH_REQUIRED=true`を設定した場合はGatewayでの認証が有効となり、`GATEWAY_API_KEY`の設定が必須となります。
 - GatewayからvLLMへの認証は`VLLM_API_KEY`を用いて行われるため、Gatewayに送信された`OPENAI_API_KEY`は転送されません。（`VLLM_API_KEY`は常に必須です。）
 - `GET /health`は認証対象外です。
+- `FILE_TTL_SECONDS`には`0`〜`9223372036`の整数を指定できます。秒単位のtimeout設定には、Goの`time.Duration`に収まる有限の非負値（約292年まで）を指定できます。
 - `DOCUMENT_TEXT_EXTRACTION_ENABLED=true`の場合、画像変換に加えてテキスト抽出を行い、両方をバックエンドに送信します。
 - クライアントが指定するファイル保持期間(`expires_after.seconds`)の上限は`FILE_TTL_SECONDS`（`0`で無制限）です。未指定の場合は`FILE_TTL_SECONDS`に設定された値が適用されます。
 

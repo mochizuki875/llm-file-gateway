@@ -346,7 +346,7 @@ func TestLoadFileTTL(t *testing.T) {
 		}
 	})
 
-	for _, value := range []string{"-1", "invalid"} {
+	for _, value := range []string{"-1", "invalid", "9223372037"} {
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Setenv("FILE_TTL_SECONDS", value)
 			if _, err := Load(); err == nil || err.Error() != "FILE_TTL_SECONDS must be a non-negative integer" {
@@ -454,7 +454,7 @@ func TestLoadRequestTimeout(t *testing.T) {
 		})
 	}
 
-	for _, value := range []string{"-1", "invalid"} {
+	for _, value := range []string{"-1", "invalid", "NaN", "+Inf", "-Inf", "9223372036.9", "1e100"} {
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Setenv("REQUEST_TIMEOUT_SECONDS", value)
 			if _, err := Load(); err == nil || err.Error() != "REQUEST_TIMEOUT_SECONDS must be non-negative" {
@@ -585,7 +585,7 @@ func TestLoadDocumentRenderTimeout(t *testing.T) {
 		})
 	}
 
-	for _, value := range []string{"-1", "invalid"} {
+	for _, value := range []string{"-1", "invalid", "NaN", "+Inf", "-Inf", "9223372036.9", "1e100"} {
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Setenv("DOCUMENT_RENDER_TIMEOUT_SECONDS", value)
 			if _, err := Load(); err == nil || err.Error() != "DOCUMENT_RENDER_TIMEOUT_SECONDS must be non-negative" {
@@ -621,7 +621,7 @@ func TestLoadLibreOfficeTimeout(t *testing.T) {
 		})
 	}
 
-	for _, value := range []string{"-1", "invalid"} {
+	for _, value := range []string{"-1", "invalid", "NaN", "+Inf", "-Inf", "9223372036.9", "1e100"} {
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Setenv("DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS", value)
 			if _, err := Load(); err == nil || err.Error() != "DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS must be non-negative" {

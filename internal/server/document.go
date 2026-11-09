@@ -103,7 +103,8 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 		return resolvedDocument{}, err
 	}
 	if err := validationError; err != nil {
-		return resolvedDocument{}, apierror.New(400, "file_processing_failed", err.Error(), param)
+		slog.Warn("inline document validation failed", "filename", filepath.Base(filename), "error", err)
+		return resolvedDocument{}, inlineFileProcessingError(filename, param)
 	}
 	result, err := documentConverter.Convert(ctx, source, filepath.Join(directory, "derived"), converter.Options{
 		MaxPages: server.settings.MaxDocumentPages, MaxTextChars: server.settings.MaxDocumentTextChars,
@@ -127,9 +128,13 @@ func (server *Server) prepareDocument(ctx context.Context, reference map[string]
 		if errors.As(err, &imageLimitError) {
 			return resolvedDocument{}, apierror.New(400, "image_too_large", err.Error(), param)
 		}
-		return resolvedDocument{}, apierror.New(400, "file_processing_failed", err.Error(), param)
+		return resolvedDocument{}, inlineFileProcessingError(filename, param)
 	}
 	return resolvedDocument{filename: filepath.Base(filename), derivedDir: filepath.Join(directory, "derived"), manifest: result.Manifest}, nil
+}
+
+func inlineFileProcessingError(filename, param string) *apierror.Error {
+	return apierror.New(400, "file_processing_failed", fmt.Sprintf("File processing failed for %q.", filepath.Base(filename)), param)
 }
 
 func createRequestDirectory(workDir string) (string, error) {

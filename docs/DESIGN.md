@@ -591,7 +591,7 @@ Cancellation during file conversion processing is not supported.
 For inference requests, the context is checked before and after inline input preparation (fetch, converter resolution, validation, and conversion), before and after text/image conversion, and before forwarding the request to the backend. The file conversion wait is interrupted immediately on context cancellation.
 Expired conversion results are not used; the output of canceled text/image conversions is removed, and request-specific temporary artifacts are also deleted when the handler exits.
 
-`file_data` and `file_url` are not stored by the Files API, so they do not go through this resolution path. Instead, the source is saved to a request-specific temporary directory, and converter resolution, validation, and conversion are executed synchronously within the same request to generate the manifest. The temporary directory is deleted at the end of the request.
+`file_data` and `file_url` are not stored by the Files API, so they do not go through this resolution path. Instead, the source is saved to a request-specific temporary directory, and converter resolution, validation, and conversion are executed synchronously within the same request to generate the manifest. The temporary directory is deleted at the end of the request. Converter validation errors and unexpected conversion errors are logged with their internal details, while the API returns only `File processing failed for "<filename>".` Typed page, text, and image limit errors retain their specific public messages.
 
 ### Inference Expansion
 

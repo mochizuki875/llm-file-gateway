@@ -591,7 +591,7 @@ sequenceDiagram
 推論リクエスト時は、inline入力の準備（取得・Converter解決・検証・変換）の前後、テキスト・画像変換の前後、およびバックエンドへのリクエスト転送前にcontextを確認する。ファイル変換の待機はcontextのキャンセルで即時に中断する。
 期限切れの変換結果は使用せず、キャンセルされたテキスト・画像変換の出力を削除し、request専用の一時artifactもhandler終了時に削除する。
 
-`file_data`と`file_url`はFiles APIの保存対象ではないため、この解決経路を通らない。代わりにrequest専用の一時directoryへsourceを保存し、同じrequest内でConverterの解決・検証・変換を同期的に実行してmanifestを生成する。一時directoryはrequest終了時に削除する。
+`file_data`と`file_url`はFiles APIの保存対象ではないため、この解決経路を通らない。代わりにrequest専用の一時directoryへsourceを保存し、同じrequest内でConverterの解決・検証・変換を同期的に実行してmanifestを生成する。一時directoryはrequest終了時に削除する。Converterの入力検証errorと予期しない変換errorは内部詳細をログへ記録し、APIには`File processing failed for "<filename>".`だけを返す。型付きのページ数、テキスト、画像上限errorは、それぞれの公開メッセージを維持する。
 
 ### Inference Expansion
 

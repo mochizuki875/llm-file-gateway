@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"image"
 	"image/png"
@@ -11,7 +12,69 @@ import (
 
 	"github.com/mochizuki875/llm-file-gateway/internal/apierror"
 	"github.com/mochizuki875/llm-file-gateway/internal/converter"
+	"github.com/mochizuki875/llm-file-gateway/internal/files"
 )
+
+type failingDocumentConverter struct {
+	validateErr error
+	convertErr  error
+}
+
+func (failingDocumentConverter) Extension() string { return ".internal" }
+
+func (failingDocumentConverter) MediaType() string { return "application/octet-stream" }
+
+func (documentConverter failingDocumentConverter) Validate(string) error {
+	return documentConverter.validateErr
+}
+
+func (documentConverter failingDocumentConverter) Convert(context.Context, string, string, converter.Options) (converter.Result, error) {
+	return converter.Result{}, documentConverter.convertErr
+}
+
+func TestPrepareDocumentHidesInternalConverterErrors(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		validateErr   error
+		conversionErr error
+	}{
+		{name: "validation", validateErr: errors.New("validation failed at /tmp/converter/source.internal")},
+		{name: "conversion", conversionErr: errors.New("conversion failed at /tmp/converter/source.internal")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			settings, dataStore, _ := testDependencies(t)
+			documentConverter := failingDocumentConverter{validateErr: test.validateErr, convertErr: test.conversionErr}
+			registry := converter.Registry{
+				".internal": func(context.Context, converter.ConverterConfig, converter.ConverterHandle) (converter.DocumentConverter, error) {
+					return documentConverter, nil
+				},
+			}
+			service := files.New(settings, dataStore, converter.NewDispatcher(registry, converter.DefaultConverterConfig(), nil))
+			server := &Server{settings: settings, files: service}
+			temporary := make([]string, 0)
+			t.Cleanup(func() {
+				for _, directory := range temporary {
+					_ = os.RemoveAll(directory)
+				}
+			})
+
+			_, err := server.prepareDocument(context.Background(), map[string]any{
+				"filename":  "notes.internal",
+				"file_data": "aGVsbG8=",
+			}, "tenant", "input[0].content[0]", &temporary)
+			var gatewayError *apierror.Error
+			if !errors.As(err, &gatewayError) {
+				t.Fatalf("error = %v, want apierror.Error", err)
+			}
+			if gatewayError.Code != "file_processing_failed" || gatewayError.Message != `File processing failed for "notes.internal".` {
+				t.Fatalf("error = %#v", gatewayError)
+			}
+			if strings.Contains(gatewayError.Message, "/tmp/") {
+				t.Fatalf("error exposes internal path: %q", gatewayError.Message)
+			}
+		})
+	}
+}
 
 func TestRequestDirectoryUsesOwnerOnlyPermissions(t *testing.T) {
 	directory, err := createRequestDirectory(t.TempDir())

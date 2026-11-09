@@ -124,6 +124,7 @@ The Gateway reads configuration values from the process environment variables.
 - Setting `GATEWAY_AUTH_REQUIRED=true` enables authentication at the Gateway, making `GATEWAY_API_KEY` required.
 - Authentication from the Gateway to vLLM is performed using `VLLM_API_KEY`, so the `OPENAI_API_KEY` sent to the Gateway is not forwarded. (`VLLM_API_KEY` is always required.)
 - `GET /health` is excluded from authentication.
+- `FILE_TTL_SECONDS` accepts integers from `0` through `9223372036`. Timeout settings in seconds accept finite non-negative values that fit in a Go `time.Duration` (approximately 292 years).
 - When `DOCUMENT_TEXT_EXTRACTION_ENABLED=true`, text extraction is performed in addition to image conversion, and both are sent to the backend.
 - The upper limit for the file retention period specified by clients (`expires_after.seconds`) is `FILE_TTL_SECONDS` (`0` for unlimited). If not specified, the value set in `FILE_TTL_SECONDS` is applied.
 

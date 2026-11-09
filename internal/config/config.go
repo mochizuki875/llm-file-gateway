@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -72,9 +73,10 @@ func Load() (Config, error) {
 	}
 
 	fileTTLSeconds, err := envInt64("FILE_TTL_SECONDS", int64(defaultFileTTL/time.Second))
-	if err != nil || fileTTLSeconds < 0 {
+	if err != nil || fileTTLSeconds < 0 || fileTTLSeconds > maxDurationWholeSeconds {
 		return Config{}, fmt.Errorf("FILE_TTL_SECONDS must be a non-negative integer")
 	}
+	fileTTL := time.Duration(fileTTLSeconds) * time.Second
 
 	maxFileBytes, err := envInt64("MAX_FILE_BYTES", 50*1024*1024)
 	if err != nil || maxFileBytes < 0 {
@@ -137,11 +139,13 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("DOCUMENT_DPI must be an integer between 1 and 1200")
 	}
 	documentRenderTimeoutSeconds, err := envFloat("DOCUMENT_RENDER_TIMEOUT_SECONDS", 300)
-	if err != nil || documentRenderTimeoutSeconds < 0 {
+	documentRenderTimeout, valid := secondsToDuration(documentRenderTimeoutSeconds)
+	if err != nil || !valid {
 		return Config{}, fmt.Errorf("DOCUMENT_RENDER_TIMEOUT_SECONDS must be non-negative")
 	}
 	libreOfficeTimeoutSeconds, err := envFloat("DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS", 300)
-	if err != nil || libreOfficeTimeoutSeconds < 0 {
+	libreOfficeTimeout, valid := secondsToDuration(libreOfficeTimeoutSeconds)
+	if err != nil || !valid {
 		return Config{}, fmt.Errorf("DOCUMENT_LIBREOFFICE_TIMEOUT_SECONDS must be non-negative")
 	}
 	textExtractionEnabled, err := envBool("DOCUMENT_TEXT_EXTRACTION_ENABLED", true)
@@ -161,7 +165,8 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("MAX_CONCURRENT_REQUESTS must be a non-negative integer")
 	}
 	timeoutSeconds, err := envFloat("REQUEST_TIMEOUT_SECONDS", 300)
-	if err != nil || timeoutSeconds < 0 {
+	requestTimeout, valid := secondsToDuration(timeoutSeconds)
+	if err != nil || !valid {
 		return Config{}, fmt.Errorf("REQUEST_TIMEOUT_SECONDS must be non-negative")
 	}
 	logVerbosity, err := envInt("LOGLEVEL", 0)
@@ -177,7 +182,7 @@ func Load() (Config, error) {
 		GatewayAPIKey:               os.Getenv("GATEWAY_API_KEY"),
 		VLLMAPIKey:                  os.Getenv("VLLM_API_KEY"),
 		DataDir:                     envString("GATEWAY_DATA_DIR", "gateway-data"),
-		FileTTL:                     time.Duration(fileTTLSeconds) * time.Second,
+		FileTTL:                     fileTTL,
 		MaxFileBytes:                maxFileBytes,
 		MaxRequestBodyBytes:         maxRequestBodyBytes,
 		MaxDocumentPages:            maxPages,
@@ -192,13 +197,13 @@ func Load() (Config, error) {
 		MaxDocumentOOXMLMemberBytes: maxOOXMLMemberBytes,
 		MaxDocumentOOXMLTotalBytes:  maxOOXMLTotalBytes,
 		DocumentDPI:                 documentDPI,
-		DocumentRenderTimeout:       time.Duration(documentRenderTimeoutSeconds * float64(time.Second)),
-		LibreOfficeTimeout:          time.Duration(libreOfficeTimeoutSeconds * float64(time.Second)),
+		DocumentRenderTimeout:       documentRenderTimeout,
+		LibreOfficeTimeout:          libreOfficeTimeout,
 		TextExtractionEnabled:       textExtractionEnabled,
 		Workers:                     workers,
 		ConversionQueueCapacity:     conversionQueueCapacity,
 		MaxConcurrentRequests:       maxConcurrentRequests,
-		RequestTimeout:              time.Duration(timeoutSeconds * float64(time.Second)),
+		RequestTimeout:              requestTimeout,
 		LogVerbosity:                logVerbosity,
 	}
 	if config.VLLMAPIKey == "" {
@@ -280,4 +285,24 @@ func envFloat(name string, fallback float64) (float64, error) {
 		return 0, fmt.Errorf("%s must be a number", name)
 	}
 	return parsed, nil
+}
+
+const maxDurationWholeSeconds = int64(math.MaxInt64) / int64(time.Second)
+
+// secondsToDuration converts non-negative finite seconds to a duration
+// without overflowing time.Duration.
+func secondsToDuration(seconds float64) (time.Duration, bool) {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 {
+		return 0, false
+	}
+	wholeSeconds, fractionalSeconds := math.Modf(seconds)
+	if wholeSeconds > float64(maxDurationWholeSeconds) {
+		return 0, false
+	}
+	wholeDuration := time.Duration(int64(wholeSeconds)) * time.Second
+	fractionalDuration := time.Duration(fractionalSeconds * float64(time.Second))
+	if fractionalDuration > time.Duration(math.MaxInt64)-wholeDuration {
+		return 0, false
+	}
+	return wholeDuration + fractionalDuration, true
 }
