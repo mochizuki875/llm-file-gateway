@@ -872,7 +872,8 @@ func TestOpenAIFileStatusDetails(t *testing.T) {
 		{name: "uploaded", status: "uploaded", wantStatus: "uploaded"},
 		{name: "processing", status: "processing", wantStatus: "uploaded"},
 		{name: "processed", status: "processed", wantStatus: "processed"},
-		{name: "failed_with_message", status: "failed", errorMsg: "document exceeds the 50-page limit", wantStatus: "error", wantDetails: "document exceeds the 50-page limit"},
+		{name: "failed_with_message", status: "failed", errorMsg: "document exceeds the 50-page limit", wantStatus: "error", wantDetails: `File processing failed for "notes.txt".`},
+		{name: "failed_with_internal_path", status: "failed", errorMsg: "could not render /tmp/document-image-renderer-123/source.pdf", wantStatus: "error", wantDetails: `File processing failed for "notes.txt".`},
 		{name: "failed_without_message", status: "failed", wantStatus: "error"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

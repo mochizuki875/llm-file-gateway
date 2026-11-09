@@ -391,7 +391,7 @@ func openAIFile(record store.File) map[string]any {
 	}
 	var statusDetails any
 	if record.Status == "failed" && record.ErrorMessage.Valid && record.ErrorMessage.String != "" {
-		statusDetails = record.ErrorMessage.String
+		statusDetails = fmt.Sprintf("File processing failed for %q.", record.Filename)
 	}
 	return map[string]any{
 		"id": record.ID, "object": "file", "bytes": record.Bytes,

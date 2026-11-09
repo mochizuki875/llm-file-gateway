@@ -323,7 +323,7 @@ Conversion results are stored in `manifest.json` with schema version 1. The sche
 
 The Files API returns `uploaded` after storing. The worker updates the status to `processing` when conversion starts and to `processed` after the manifest is persisted. If conversion fails, the status is updated to `failed`. `deleted` at deletion time is a conceptual state on the API; in the DB, `deleted_at` is set to make the record invisible, and after waiting for conversion and read leases to finish, the record is physically deleted.
 
-The `status` field exposed by the Files API normalizes these internal states: `uploaded` and `processing` are both returned as `uploaded`, `processed` is returned as `processed`, and `failed` is returned as `error` with the error message in `status_details`.
+The `status` field exposed by the Files API normalizes these internal states: `uploaded` and `processing` are both returned as `uploaded`, `processed` is returned as `processed`, and `failed` is returned as `error`. When an error message is recorded, `status_details` identifies the original filename with the message `File processing failed for "<filename>".` rather than exposing internal error details; otherwise it is `null`.
 
 ```mermaid
 stateDiagram-v2

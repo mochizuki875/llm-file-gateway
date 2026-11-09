@@ -323,7 +323,7 @@ func NewInTreeRegistry() Registry {
 
 Files APIは保存後に`uploaded`を返す。workerは変換開始時に`processing`へ、manifestの永続化後に`processed`へ更新する。変換に失敗した場合は`failed`へ更新する。削除時の`deleted`はAPI上の概念状態であり、DBでは`deleted_at`を設定して不可視化した後、変換とread leaseの終了を待ってrecordを物理削除する。
 
-Files APIが返す`status`フィールドはこれらの内部状態を正規化した値であり、`uploaded`と`processing`はいずれも`uploaded`として、`processed`は`processed`として返す。`failed`は`status_details`にエラーメッセージを含めた`error`として返す。
+Files APIが返す`status`フィールドはこれらの内部状態を正規化した値であり、`uploaded`と`processing`はいずれも`uploaded`として、`processed`は`processed`として返す。`failed`は`error`として返す。エラーメッセージが記録されている場合、`status_details`には内部エラーの詳細ではなく、元のファイル名を示す`File processing failed for "<filename>".`を含める。記録されていない場合は`null`を返す。
 
 ```mermaid
 stateDiagram-v2
