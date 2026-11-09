@@ -2,7 +2,8 @@ FROM mcr.microsoft.com/devcontainers/go:1.27-bookworm
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    TZ=UTC
+    TZ=UTC \
+    GOTOOLCHAIN=auto
 
 RUN rm -f /etc/apt/sources.list.d/yarn.list \
     && apt-get update \

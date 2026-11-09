@@ -12,7 +12,13 @@
       ],
       "settings": {
         "go.diagnostic.vulncheck": "Off",
+        "go.testEnvVars": {
+          "GOTOOLCHAIN": "go1.27.3"
+        },
         "go.toolsManagement.checkForUpdates": "local",
+        "go.toolsEnvVars": {
+          "GOTOOLCHAIN": "go1.27.3"
+        },
         "go.useLanguageServer": true
       }
     }

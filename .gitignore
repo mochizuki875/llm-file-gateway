@@ -1,5 +1,6 @@
 /.env
 .venv/
+/.vscode
 /gateway-data/
 /bug_report/
 /llm-file-gateway

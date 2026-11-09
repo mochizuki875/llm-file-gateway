@@ -4,7 +4,7 @@
 
 LLM File Gateway is a Go gateway that provides an OpenAI Files API-compatible interface in front of a vLLM server. Uploaded files (PDF, Office, text, images) are converted asynchronously into extracted text plus base64 images, then expanded into Responses API / Chat Completions requests forwarded to vLLM.
 
-- Module: `github.com/mochizuki875/llm-file-gateway` (Go 1.27+)
+- Module: `github.com/mochizuki875/llm-file-gateway` (Go 1.27.3+)
 - Key dependency: `github.com/mochizuki875/document-image-renderer` (PDFium/WASM + LibreOffice for PDF/Office rendering)
 - SQLite via `modernc.org/sqlite` (CGO-free)
 - See `README.md` for user-facing docs and `docs/DESIGN.md` for architecture details.

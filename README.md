@@ -61,7 +61,7 @@ File image conversion uses [document-image-renderer](https://github.com/mochizuk
 
 ## Requirements
 
-- Go 1.27 or later
+- Go 1.27.3 or later
 - A vLLM server that provides an OpenAI-compatible API
 - A multimodal-capable model
 - Runtime requirements of [document-image-renderer](https://github.com/mochizuki875/document-image-renderer)

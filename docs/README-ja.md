@@ -61,7 +61,7 @@ PDF、Officeファイル、テキスト、画像などのファイルをOpenAI F
 
 ## Requirements
 
-- Go 1.27以降
+- Go 1.27.3以降
 - OpenAI互換APIを提供するvLLMサーバー
 - マルチモーダル対応モデル
 - [document-image-renderer](https://github.com/mochizuki875/document-image-renderer)の動作要件
