@@ -37,7 +37,7 @@ RUN apt-get update \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
-COPY .devcontainer/fonts.conf /etc/fonts/local.conf
+COPY config/fonts.conf /etc/fonts/local.conf
 
 RUN fc-cache -f \
     && useradd --create-home --home-dir /home/gateway --no-log-init \

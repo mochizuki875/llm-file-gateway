@@ -10,5 +10,5 @@
 !internal/
 !internal/**
 
-!.devcontainer/
-!.devcontainer/fonts.conf
+!config/
+!config/fonts.conf

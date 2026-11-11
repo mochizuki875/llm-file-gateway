@@ -19,7 +19,7 @@ RUN rm -f /etc/apt/sources.list.d/yarn.list \
         libreoffice-writer \
     && rm -rf /var/lib/apt/lists/*
 
-COPY .devcontainer/fonts.conf /etc/fonts/local.conf
+COPY config/fonts.conf /etc/fonts/local.conf
 COPY .devcontainer/fonts/ /usr/local/share/fonts/custom/
 
 RUN fc-cache -f
